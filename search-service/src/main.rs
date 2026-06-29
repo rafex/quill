@@ -29,6 +29,28 @@ fn mqtt_port() -> u16 {
         .unwrap_or(1883)
 }
 
+const DEADLETTER_TOPIC: &str = "forum.deadletter";
+
+fn publish_to_deadletter(
+    client: &rumqttc::Client,
+    original_topic: &str,
+    message_id: &str,
+    payload: &str,
+    error: &str,
+) {
+    let envelope = serde_json::json!({
+        "original_topic": original_topic,
+        "message_id": message_id,
+        "error": error,
+        "payload": payload,
+    })
+    .to_string();
+
+    if let Err(e) = client.publish(DEADLETTER_TOPIC, QoS::AtLeastOnce, false, envelope) {
+        eprintln!("failed to publish to {DEADLETTER_TOPIC}: {e}");
+    }
+}
+
 #[cfg(feature = "onnx-embeddings")]
 fn onnx_model_dir() -> String {
     std::env::var("SEARCH_ONNX_MODEL_DIR").unwrap_or_else(|_| "models/all-MiniLM-L6-v2".to_string())
@@ -192,7 +214,7 @@ fn process_inbox() {
 
                 let message_id = format!("{}:{}", publish.topic, ext_id);
 
-                let result = inbox_worker::process_message(
+                let result = inbox_worker::process_with_retry(
                     &conn,
                     &message_id,
                     &publish.topic,
@@ -207,7 +229,10 @@ fn process_inbox() {
                 match result {
                     Ok(true) => println!("indexed {content_type} {ext_id}"),
                     Ok(false) => println!("skipped already-processed message {message_id}"),
-                    Err(error) => eprintln!("failed to process message {message_id}: {error}"),
+                    Err(error) => {
+                        eprintln!("giving up on message {message_id}: {error}");
+                        publish_to_deadletter(&client, &publish.topic, &message_id, &payload, &error);
+                    }
                 }
             }
             Ok(_) => {}

@@ -19,6 +19,7 @@ use transport::AppState;
 
 const POST_CREATE_REQUEST_TOPIC: &str = "forum.post.create.request";
 const COMMENT_CREATE_REQUEST_TOPIC: &str = "forum.comment.create.request";
+const DEADLETTER_TOPIC: &str = "forum.deadletter";
 
 fn db_path() -> String {
     std::env::var("CONTENT_DB_PATH").unwrap_or_else(|_| "content.sqlite".to_string())
@@ -144,7 +145,7 @@ fn process_inbox() {
                     .unwrap_or_else(|| publish.pkid.to_string());
                 let message_id = format!("{}:{}", publish.topic, request_id);
 
-                let result = inbox_worker::process_message(
+                let result = inbox_worker::process_with_retry(
                     &conn,
                     &message_id,
                     &publish.topic,
@@ -155,7 +156,10 @@ fn process_inbox() {
                 match result {
                     Ok(true) => println!("processed {message_id}"),
                     Ok(false) => println!("skipped already-processed message {message_id}"),
-                    Err(error) => eprintln!("failed to process message {message_id}: {error}"),
+                    Err(error) => {
+                        eprintln!("giving up on message {message_id}: {error}");
+                        publish_to_deadletter(&client, &publish.topic, &message_id, &payload, &error);
+                    }
                 }
             }
             Ok(_) => {}
@@ -164,6 +168,26 @@ fn process_inbox() {
                 break;
             }
         }
+    }
+}
+
+fn publish_to_deadletter(
+    client: &rumqttc::Client,
+    original_topic: &str,
+    message_id: &str,
+    payload: &str,
+    error: &str,
+) {
+    let envelope = serde_json::json!({
+        "original_topic": original_topic,
+        "message_id": message_id,
+        "error": error,
+        "payload": payload,
+    })
+    .to_string();
+
+    if let Err(e) = client.publish(DEADLETTER_TOPIC, QoS::AtLeastOnce, false, envelope) {
+        eprintln!("failed to publish to {DEADLETTER_TOPIC}: {e}");
     }
 }
 

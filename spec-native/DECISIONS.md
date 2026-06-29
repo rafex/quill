@@ -175,3 +175,36 @@ registrada condiciona el diseno o la implementacion.
   revisarse explícitamente — no descartar NATS por inercia sin releer
   este registro.
 - Reemplaza: `none`
+
+### DEC-0007 - Reintentos con backoff fijo antes de forum.deadletter
+
+- Fecha: 2026-06-29
+- Estado: `accepted`
+- Relacionado con specs: SPEC-USERS-0001, SPEC-CONTENT-0001, SPEC-SEARCH-0001
+- Relacionado con tareas: `none` (trabajo transversal, no ligado a una sola spec)
+- Contexto: el worker Inbox de los tres servicios fallaba en silencio
+  (solo `eprintln!`) cuando el handler devolvía error; el mensaje se
+  perdía sin rastro y sin ningún mecanismo de recuperación, pese a que
+  `forum.deadletter` ya estaba documentado como topic esperado desde el
+  prompt de arquitectura original.
+- Decision: se agregó `infrastructure::inbox_worker::process_with_retry`
+  (idéntico en los tres servicios, igual que el resto de `inbox_worker.rs`)
+  con un backoff fijo de `[200ms, 500ms, 1000ms]` (3 reintentos) antes de
+  rendirse. Es seguro reintentar porque `process_message` ya distingue
+  "recibido pero no procesado" de "procesado": un reintento nunca
+  reinserta ni reprocesa una fila ya confirmada. Al agotar los reintentos,
+  se publica a `forum.deadletter` un envelope con `original_topic`,
+  `message_id`, `error` y el `payload` original completo, usando el
+  mismo cliente MQTT que ya estaba abierto para suscribirse (no se abre
+  una conexión nueva).
+- Consecuencias: el backoff es fijo y deliberadamente corto (no modela
+  un SLA real); si en el futuro se necesita backoff exponencial
+  configurable o un límite de reintentos distinto por servicio, hay que
+  revisar esta decisión. Nadie consume `forum.deadletter` todavía — hoy
+  es solo un registro para inspección manual, no hay un proceso de
+  reprocesamiento automático de la cola de deadletter.
+- Validado contra Mosquitto real: un `forum.post.create.request` con un
+  `topic_id` inexistente (viola la foreign key) reintenta 3 veces con
+  los delays esperados y termina publicando a `forum.deadletter` con el
+  error real de SQLite.
+- Reemplaza: `none`

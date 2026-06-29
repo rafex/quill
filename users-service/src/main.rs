@@ -27,6 +27,28 @@ fn mqtt_port() -> u16 {
         .unwrap_or(1883)
 }
 
+const DEADLETTER_TOPIC: &str = "forum.deadletter";
+
+fn publish_to_deadletter(
+    client: &rumqttc::Client,
+    original_topic: &str,
+    message_id: &str,
+    payload: &str,
+    error: &str,
+) {
+    let envelope = serde_json::json!({
+        "original_topic": original_topic,
+        "message_id": message_id,
+        "error": error,
+        "payload": payload,
+    })
+    .to_string();
+
+    if let Err(e) = client.publish(DEADLETTER_TOPIC, QoS::AtLeastOnce, false, envelope) {
+        eprintln!("failed to publish to {DEADLETTER_TOPIC}: {e}");
+    }
+}
+
 fn main() {
     let command = std::env::args().nth(1).unwrap_or_else(|| "help".to_string());
 
@@ -119,7 +141,7 @@ fn process_inbox() {
                     .and_then(|v| v.get("message_id").and_then(|m| m.as_str().map(str::to_string)))
                     .unwrap_or_else(|| publish.pkid.to_string());
 
-                let result = inbox_worker::process_message(
+                let result = inbox_worker::process_with_retry(
                     &conn,
                     &message_id,
                     &publish.topic,
@@ -130,8 +152,13 @@ fn process_inbox() {
                     },
                 );
 
-                if let Err(error) = result {
-                    eprintln!("failed to process message {message_id}: {error}");
+                match result {
+                    Ok(true) => println!("processed {message_id}"),
+                    Ok(false) => println!("skipped already-processed message {message_id}"),
+                    Err(error) => {
+                        eprintln!("giving up on message {message_id}: {error}");
+                        publish_to_deadletter(&client, &publish.topic, &message_id, &payload, &error);
+                    }
                 }
             }
             Ok(_) => {}
