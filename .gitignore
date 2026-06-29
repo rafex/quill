@@ -6,3 +6,6 @@
 **/*.sqlite
 **/*.sqlite-wal
 **/*.sqlite-shm
+
+# downloaded ONNX embedding models (fetched via `search-service download-model`)
+**/models/

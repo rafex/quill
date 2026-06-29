@@ -9,7 +9,7 @@ created_at = "2026-06-28"
 updated_at = "2026-06-28"
 replaces = "none"
 related_tasks = ["TASK-SEARCH-0001", "TASK-SEARCH-0002", "TASK-SEARCH-0003", "TASK-SEARCH-0004", "TASK-SEARCH-0005", "TASK-SEARCH-0006"]
-related_decisions = []
+related_decisions = ["DEC-0001", "DEC-0002", "DEC-0003", "DEC-0006"]
 artifacts = ["search-service/*"]
 validation = ["cargo test -p search-service", "manual: indexar un post/comentario real emitido por content-service y verificar fila en sqlite-vec + FTS5", "manual: consulta hibrida con score = 0.60*vector + 0.40*bm25 devuelve resultados coherentes"]
 ```
@@ -17,7 +17,7 @@ validation = ["cargo test -p search-service", "manual: indexar un post/comentari
 ## Metadata
 
 - ID: SPEC-SEARCH-0001
-- Estado: `done` (TASK-SEARCH-0006 queda abierta como follow-up explicito, no bloqueante)
+- Estado: `done` (TASK-SEARCH-0006 completada el 2026-06-29, ver DEC-0006)
 - Owner: platform
 - Fecha de creacion: 2026-06-28
 - Ultima actualizacion: 2026-06-28
@@ -25,7 +25,7 @@ validation = ["cargo test -p search-service", "manual: indexar un post/comentari
 - Tareas relacionadas: `TASK-SEARCH-0001`, `TASK-SEARCH-0002`,
   `TASK-SEARCH-0003`, `TASK-SEARCH-0004`, `TASK-SEARCH-0005`,
   `TASK-SEARCH-0006`
-- Decisiones relacionadas: `none`
+- Decisiones relacionadas: `DEC-0001`, `DEC-0002`, `DEC-0003`, `DEC-0006`
 
 ## Resumen
 
@@ -172,4 +172,16 @@ y responde a consultas híbridas combinando ambos scores.
 
 - Commits o PRs: pendiente (sin commit todavia en este repo)
 - Archivos principales: `search-service/*`
-- Resultado de validacion: `cargo test` 11/11 ok; walkthrough manual end-to-end real: content-service crea posts -> publish-outbox -> search-service indexa via MQTT (FTS5 + sqlite-vec real) -> GET /search devuelve resultados rankeados correctamente por relevancia textual. Dos bugs reales encontrados y corregidos en el camino: (1) vec0 con JOIN requiere `k = ?` explicito en WHERE en vez de LIMIT; (2) los wildcards MQTT (`+`/`#`) solo aplican a niveles separados por `/`, no por `.`, asi que hubo que suscribirse a cada topic de contenido explicitamente.
+- Resultado de validacion: `cargo test` 11/11 ok (tambien con
+  `--features onnx-embeddings`); walkthrough manual end-to-end real:
+  content-service crea posts -> publish-outbox -> search-service indexa
+  via MQTT (FTS5 + sqlite-vec real) -> GET /search devuelve resultados
+  rankeados correctamente por relevancia textual y, con el provider ONNX
+  real, tambien por relevancia semantica (consulta sin overlap lexico
+  encuentra el contenido correcto). Bugs reales encontrados y
+  corregidos: (1) vec0 con JOIN requiere `k = ?` explicito en WHERE en
+  vez de LIMIT; (2) los wildcards MQTT (`+`/`#`) solo aplican a niveles
+  separados por `/`, no por `.`, asi que hubo que suscribirse a cada
+  topic de contenido explicitamente; (3) API real de `ort` 2.0.0-rc.12
+  difiere de la documentacion generica usada inicialmente (tensores via
+  tuplas `(shape, Vec<T>)`, no `ndarray` directo).

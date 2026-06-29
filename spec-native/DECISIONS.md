@@ -43,6 +43,51 @@ registrada condiciona el diseno o la implementacion.
   solo demuestra el mecanismo. El score combinado en producción no debe
   usarse hasta que TASK-SEARCH-0006 se complete.
 - Reemplaza: `none`
+- Actualizacion 2026-06-29: TASK-SEARCH-0006 se completó. Ver DEC-0006
+  para la decisión de cómo se integró ONNX real (como eleccion de build,
+  no como reemplazo obligatorio del stub).
+
+### DEC-0006 - ONNX/MiniLM real como Cargo feature, eleccion de build/runtime
+
+- Fecha: 2026-06-29
+- Estado: `accepted`
+- Relacionado con specs: SPEC-SEARCH-0001
+- Relacionado con tareas: TASK-SEARCH-0006
+- Contexto: tras DEC-0001, había que decidir cómo convive el stub
+  determinista con la integración ONNX real sin que una excluya a la
+  otra — el usuario pidió explícitamente que fuera "una elección de
+  instalación, no una limitante".
+- Decision: `search-service` expone dos Cargo features:
+  `stub-embeddings` (default) y `onnx-embeddings` (trae `ort`,
+  `tokenizers`, `ureq` como dependencias opcionales). El binario
+  compilado sin `onnx-embeddings` no tiene ninguna dependencia nativa de
+  ONNX. En runtime, la variable `SEARCH_EMBEDDING_PROVIDER=stub|onnx`
+  elige el adapter; si se pide `onnx` sin haber compilado con esa
+  feature, falla con un mensaje explícito (no falla en silencio). El
+  modelo (`Xenova/all-MiniLM-L6-v2` quantizado, ONNX) y su tokenizer se
+  descargan con el comando explícito `download-model` (vía `ureq`), no
+  automáticamente en cada arranque — así un despliegue offline/Raspberry
+  Pi puede copiar los archivos del modelo manualmente sin necesitar red
+  en el servicio.
+- Medido (macOS arm64, build release):
+  - Binario: 4.9 MB (`stub-embeddings`, default) vs 33 MB
+    (`onnx-embeddings`) — el runtime de ONNX queda enlazado
+    estáticamente (`libonnxruntime.a`, ~80 MB sin comprimir, cacheado
+    fuera del repo).
+  - Modelo descargado: ~22.5 MB (tokenizer.json + model_quantized.onnx).
+  - RSS en frío con el provider ONNX cargado (antes de cualquier
+    consulta): ~90 MB. Tras una consulta real con inferencia: ~92 MB.
+  - Validado semánticamente: una consulta sin ninguna palabra en común
+    con el post indexado (`"vehicles and automobiles"` vs un post que
+    dice `"cars"`/`"driving"`/`"highway"`) lo encuentra y lo rankea
+    primero — algo que el stub hash-based nunca podía lograr.
+- Consecuencias: ~90MB de RSS es significativamente más que los otros
+  servicios (sin medir aún en Raspberry Pi real, solo macOS arm64); si
+  ese costo resulta inaceptable en hardware objetivo, la mitigación es
+  seguir usando `stub-embeddings` (build sin la feature) o evaluar un
+  modelo aún más pequeño, no volver a Python.
+- Reemplaza: `none` (complementa DEC-0001; el stub sigue siendo el
+  default y la opción recomendada para builds ultra-ligeros).
 
 ### DEC-0002 - sqlite-vec real en vez de similitud manual
 

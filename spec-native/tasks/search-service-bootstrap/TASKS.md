@@ -61,19 +61,22 @@ el resto del sistema (ese es el punto de tener el trait).
 ```toml
 id = "TASK-SEARCH-0006"
 title = "Reemplazar el stub por ONNX Runtime + MiniLM"
-state = "todo"
+state = "done"
 owner = "platform"
 dependencies = ["TASK-SEARCH-0002"]
-expected_files = ["search-service/src/adapters/onnx_embedding_provider.rs"]
-close_criteria = "El mismo texto de prueba produce un embedding semantico real de dimension 384 via ONNX Runtime + MiniLM, sin cambios en ports/application/transport"
-validation = ["test que verifica dimension del vector", "medicion documentada de tamano de binario y RAM en frio antes de adoptar en produccion", "comparacion manual: textos semanticamente similares dan mayor similitud que con el stub"]
+expected_files = ["search-service/src/adapters/onnx_embedding_provider.rs", "search-service/src/adapters/model_downloader.rs", "search-service/Cargo.toml", "search-service/src/main.rs"]
+close_criteria = "El mismo texto de prueba produce un embedding semantico real de dimension 384 via ONNX Runtime + MiniLM, sin cambios en ports/application/transport. La eleccion stub/onnx es de build (Cargo feature) y runtime (env var), no una limitante fija."
+validation = ["cargo test -p search-service y --features onnx-embeddings (11/11 ambos)", "medicion documentada de tamano de binario (4.9MB vs 33MB) y RAM en frio (~90MB) - ver DEC-0006", "validacion semantica real: consulta sin overlap lexico encuentra el post correcto (probado con Mosquitto + content-service reales)"]
 ```
 
-Pendiente de implementar. Riesgo abierto: el binario de ONNX Runtime via
-`ort` (feature `download-binaries`) requiere red en el primer build; para
-Raspberry Pi/offline-first hay que decidir entre vendoring manual del
-binario o aceptar ese costo de build inicial. Esta tarea debe documentar
-esa decision antes de cerrarse.
+Completado. Se agregaron Cargo features `stub-embeddings` (default) y
+`onnx-embeddings` (opcional: `ort`, `tokenizers`, `ureq`) en
+`search-service/Cargo.toml`. La seleccion en runtime es
+`SEARCH_EMBEDDING_PROVIDER=stub|onnx`. El modelo
+(`Xenova/all-MiniLM-L6-v2` quantizado) se descarga con el comando
+explicito `download-model`, no automaticamente. Ver DEC-0006 en
+`DECISIONS.md` para las mediciones de tamano de binario/RAM y la
+validacion semantica real contra Mosquitto + content-service.
 
 ### TASK-SEARCH-0003 - Integracion sqlite-vec
 

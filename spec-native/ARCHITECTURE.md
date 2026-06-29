@@ -176,4 +176,11 @@ sequenceDiagram
 - Procesamiento duplicado de mensajes: mitigado con `inbox_messages` e
   idempotencia explícita en cada caso de uso.
 - Cambio de modelo de embeddings: aislado detrás del trait
-  `EmbeddingProvider` para no romper el resto del sistema.
+  `EmbeddingProvider` para no romper el resto del sistema. La elección
+  entre el stub determinista (default, sin dependencias nativas) y el
+  provider ONNX/MiniLM real es una decisión de build/runtime (Cargo
+  feature `onnx-embeddings` + `SEARCH_EMBEDDING_PROVIDER`), no una
+  limitante fija — ver DEC-0006. El provider ONNX real añade ~28 MB al
+  binario (ONNX Runtime enlazado estáticamente) y ronda ~90 MB de RSS en
+  frío (medido en macOS arm64); en Raspberry Pi real esto debe
+  remedirse antes de adoptarlo como default.

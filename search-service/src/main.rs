@@ -29,6 +29,49 @@ fn mqtt_port() -> u16 {
         .unwrap_or(1883)
 }
 
+#[cfg(feature = "onnx-embeddings")]
+fn onnx_model_dir() -> String {
+    std::env::var("SEARCH_ONNX_MODEL_DIR").unwrap_or_else(|_| "models/all-MiniLM-L6-v2".to_string())
+}
+
+/// Which EmbeddingProvider to wire up is an install-time/runtime choice
+/// (SEARCH_EMBEDDING_PROVIDER=stub|onnx), not a hardcoded limitation: a
+/// lightweight build can ship with only the deterministic stub (no ONNX
+/// Runtime binary, no network at build time), while a build compiled with
+/// `--features onnx-embeddings` can opt into real semantic search.
+fn build_embedding_provider() -> Arc<dyn EmbeddingProvider> {
+    let requested = std::env::var("SEARCH_EMBEDDING_PROVIDER").unwrap_or_else(|_| "stub".to_string());
+
+    match requested.as_str() {
+        "stub" => Arc::new(StubEmbeddingProvider),
+        "onnx" => load_onnx_provider(),
+        other => {
+            eprintln!("unknown SEARCH_EMBEDDING_PROVIDER '{other}', falling back to stub");
+            Arc::new(StubEmbeddingProvider)
+        }
+    }
+}
+
+#[cfg(feature = "onnx-embeddings")]
+fn load_onnx_provider() -> Arc<dyn EmbeddingProvider> {
+    let model_dir = onnx_model_dir();
+    Arc::new(
+        adapters::OnnxEmbeddingProvider::load(&model_dir).unwrap_or_else(|e| {
+            panic!(
+                "failed to load ONNX embedding provider from {model_dir}: {e}\n\
+                 run `search-service download-model` first"
+            )
+        }),
+    )
+}
+
+#[cfg(not(feature = "onnx-embeddings"))]
+fn load_onnx_provider() -> Arc<dyn EmbeddingProvider> {
+    panic!(
+        "SEARCH_EMBEDDING_PROVIDER=onnx requires rebuilding with --features onnx-embeddings"
+    )
+}
+
 fn main() {
     let command = std::env::args().nth(1).unwrap_or_else(|| "help".to_string());
 
@@ -41,17 +84,30 @@ fn main() {
         }
         "process-inbox" => process_inbox(),
         "serve" => serve(),
+        "download-model" => download_model(),
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("available commands: init-db, process-inbox, serve");
+            eprintln!("available commands: init-db, process-inbox, serve, download-model");
             std::process::exit(1);
         }
     }
 }
 
+#[cfg(feature = "onnx-embeddings")]
+fn download_model() {
+    let model_dir = onnx_model_dir();
+    adapters::download_model(&model_dir).expect("failed to download model");
+}
+
+#[cfg(not(feature = "onnx-embeddings"))]
+fn download_model() {
+    eprintln!("download-model requires rebuilding with --features onnx-embeddings");
+    std::process::exit(1);
+}
+
 fn serve() {
     let conn = Arc::new(Mutex::new(open_db()));
-    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider);
+    let embedding_provider = build_embedding_provider();
     let state = AppState {
         search: Arc::new(HybridSearch::new(conn, embedding_provider)),
     };
@@ -83,7 +139,7 @@ fn open_db() -> rusqlite::Connection {
 
 fn process_inbox() {
     let conn = Arc::new(Mutex::new(open_db()));
-    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider);
+    let embedding_provider = build_embedding_provider();
     let index_content = IndexContent::new(conn.clone(), embedding_provider);
 
     let (client, mut connection) =
