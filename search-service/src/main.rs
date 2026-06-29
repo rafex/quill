@@ -1,0 +1,164 @@
+mod adapters;
+mod application;
+mod domain;
+mod infrastructure;
+mod ports;
+mod transport;
+
+use std::sync::{Arc, Mutex};
+
+use adapters::StubEmbeddingProvider;
+use application::{HybridSearch, IndexContent};
+use infrastructure::{db, inbox_worker, mqtt};
+use ports::EmbeddingProvider;
+use rumqttc::QoS;
+use transport::AppState;
+
+fn db_path() -> String {
+    std::env::var("SEARCH_DB_PATH").unwrap_or_else(|_| "search.sqlite".to_string())
+}
+
+fn mqtt_host() -> String {
+    std::env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".to_string())
+}
+
+fn mqtt_port() -> u16 {
+    std::env::var("MQTT_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(1883)
+}
+
+fn main() {
+    let command = std::env::args().nth(1).unwrap_or_else(|| "help".to_string());
+
+    match command.as_str() {
+        "init-db" => {
+            let path = db_path();
+            let conn = db::open(&path).expect("failed to open sqlite connection");
+            db::init_schema(&conn).expect("failed to initialize schema");
+            println!("initialized {path}");
+        }
+        "process-inbox" => process_inbox(),
+        "serve" => serve(),
+        other => {
+            eprintln!("unknown command: {other}");
+            eprintln!("available commands: init-db, process-inbox, serve");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn serve() {
+    let conn = Arc::new(Mutex::new(open_db()));
+    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider);
+    let state = AppState {
+        search: Arc::new(HybridSearch::new(conn, embedding_provider)),
+    };
+
+    let addr = std::env::var("SEARCH_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8082".to_string());
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+
+    runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .expect("failed to bind http listener");
+        println!("search-service listening on {addr}");
+        axum::serve(listener, transport::router(state))
+            .await
+            .expect("http server failed");
+    });
+}
+
+fn open_db() -> rusqlite::Connection {
+    let path = db_path();
+    let conn = db::open(&path).expect("failed to open sqlite connection");
+    db::init_schema(&conn).expect("failed to initialize schema");
+    conn
+}
+
+fn process_inbox() {
+    let conn = Arc::new(Mutex::new(open_db()));
+    let embedding_provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider);
+    let index_content = IndexContent::new(conn.clone(), embedding_provider);
+
+    let (client, mut connection) =
+        mqtt::connect("search-service-inbox", &mqtt_host(), mqtt_port());
+    // MQTT wildcards ('+'/'#') only match whole levels separated by '/';
+    // our topics use '.' as namespace separator, so there is no wildcard
+    // that matches both - subscribe to each topic explicitly instead.
+    let topics = std::env::var("SEARCH_INBOX_TOPICS").unwrap_or_else(|_| {
+        "forum.post.created,forum.comment.created".to_string()
+    });
+    for topic in topics.split(',') {
+        client
+            .subscribe(topic, QoS::AtLeastOnce)
+            .expect("failed to subscribe to inbox topic");
+        println!("listening on {topic}");
+    }
+
+    for notification in connection.iter() {
+        match notification {
+            Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish))) => {
+                let payload = String::from_utf8_lossy(&publish.payload).to_string();
+                let parsed: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
+
+                let ext_id = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let body = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("body"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let title = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("title"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content_type = if publish.topic.contains("comment") {
+                    "comment"
+                } else {
+                    "post"
+                };
+
+                let (Some(ext_id), Some(body)) = (ext_id, body) else {
+                    eprintln!("skipping malformed message on {}: {payload}", publish.topic);
+                    continue;
+                };
+
+                let message_id = format!("{}:{}", publish.topic, ext_id);
+
+                let result = inbox_worker::process_message(
+                    &conn,
+                    &message_id,
+                    &publish.topic,
+                    &payload,
+                    |_| {
+                        index_content
+                            .execute(&ext_id, content_type, &title, &body)
+                            .map_err(|e: application::IndexContentError| e.to_string())
+                    },
+                );
+
+                match result {
+                    Ok(true) => println!("indexed {content_type} {ext_id}"),
+                    Ok(false) => println!("skipped already-processed message {message_id}"),
+                    Err(error) => eprintln!("failed to process message {message_id}: {error}"),
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("mqtt connection error: {error}");
+                break;
+            }
+        }
+    }
+}
