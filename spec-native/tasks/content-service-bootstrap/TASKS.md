@@ -95,3 +95,24 @@ validation = ["test de integracion: outbox no se publica antes del commit", "wal
 
 Reutiliza el mecanismo de `publish-outbox` ya construido para
 `users-service`, adaptado a los nuevos topics de contenido.
+
+### TASK-CONTENT-0006 - Creacion de posts/comentarios via MQTT
+
+```toml
+id = "TASK-CONTENT-0006"
+title = "Wire forum.post.create.request y forum.comment.create.request"
+state = "done"
+owner = "platform"
+dependencies = ["TASK-CONTENT-0005"]
+expected_files = ["content-service/src/main.rs"]
+close_criteria = "Un mensaje en forum.post.create.request o forum.comment.create.request crea el recurso real (no un placeholder) e idempotencia via request_id"
+validation = ["walkthrough manual contra Mosquitto real: crear post via MQTT sin pasar por HTTP, confirmar forum.post.created emitido tras publish-outbox", "duplicar request_id y confirmar que no se reprocesa"]
+```
+
+Reemplaza el placeholder `forum.content.command` (que no llamaba a ningun
+caso de uso real) por dos suscripciones explicitas que invocan
+`CreatePost`/`CreateComment`, los mismos casos de uso que ya usa el
+transport HTTP. La idempotencia usa `request_id` del payload como
+`message_id` del Inbox. `forum.post.created`/`forum.comment.created` se
+siguen publicando solos via el Outbox ya existente — no hubo que tocar
+los repositorios.

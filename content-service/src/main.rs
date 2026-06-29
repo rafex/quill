@@ -11,9 +11,14 @@ use adapters::{
     MqttEventPublisher, SqliteCategoryRepository, SqliteCommentRepository, SqlitePostRepository,
     SqliteTopicRepository,
 };
+use application::{CreateComment, CreatePost};
 use infrastructure::{db, inbox_worker, mqtt, outbox_publisher};
+use ports::{CommentRepository, PostRepository};
 use rumqttc::QoS;
 use transport::AppState;
+
+const POST_CREATE_REQUEST_TOPIC: &str = "forum.post.create.request";
+const COMMENT_CREATE_REQUEST_TOPIC: &str = "forum.comment.create.request";
 
 fn db_path() -> String {
     std::env::var("CONTENT_DB_PATH").unwrap_or_else(|_| "content.sqlite".to_string())
@@ -110,38 +115,47 @@ fn publish_outbox() {
 
 fn process_inbox() {
     let conn = Arc::new(Mutex::new(open_db()));
+    let posts: Arc<dyn PostRepository> = Arc::new(SqlitePostRepository::new(conn.clone()));
+    let comments: Arc<dyn CommentRepository> = Arc::new(SqliteCommentRepository::new(conn.clone()));
+    let create_post = CreatePost::new(posts);
+    let create_comment = CreateComment::new(comments);
 
     let (client, mut connection) =
         mqtt::connect("content-service-inbox", &mqtt_host(), mqtt_port());
-    let topic =
-        std::env::var("CONTENT_INBOX_TOPIC").unwrap_or_else(|_| "forum.content.command".to_string());
-    client
-        .subscribe(&topic, QoS::AtLeastOnce)
-        .expect("failed to subscribe to inbox topic");
-    println!("listening on {topic}");
+
+    for topic in [POST_CREATE_REQUEST_TOPIC, COMMENT_CREATE_REQUEST_TOPIC] {
+        client
+            .subscribe(topic, QoS::AtLeastOnce)
+            .expect("failed to subscribe to inbox topic");
+        println!("listening on {topic}");
+    }
 
     for notification in connection.iter() {
         match notification {
             Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish))) => {
                 let payload = String::from_utf8_lossy(&publish.payload).to_string();
-                let message_id = serde_json::from_str::<serde_json::Value>(&payload)
-                    .ok()
-                    .and_then(|v| v.get("message_id").and_then(|m| m.as_str().map(str::to_string)))
+                let parsed: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
+
+                let request_id = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("request_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
                     .unwrap_or_else(|| publish.pkid.to_string());
+                let message_id = format!("{}:{}", publish.topic, request_id);
 
                 let result = inbox_worker::process_message(
                     &conn,
                     &message_id,
                     &publish.topic,
                     &payload,
-                    |payload| {
-                        println!("processed inbox message: {payload}");
-                        Ok(())
-                    },
+                    |_| handle_create_request(&publish.topic, &parsed, &create_post, &create_comment),
                 );
 
-                if let Err(error) = result {
-                    eprintln!("failed to process message {message_id}: {error}");
+                match result {
+                    Ok(true) => println!("processed {message_id}"),
+                    Ok(false) => println!("skipped already-processed message {message_id}"),
+                    Err(error) => eprintln!("failed to process message {message_id}: {error}"),
                 }
             }
             Ok(_) => {}
@@ -150,5 +164,46 @@ fn process_inbox() {
                 break;
             }
         }
+    }
+}
+
+fn handle_create_request(
+    topic: &str,
+    payload: &Option<serde_json::Value>,
+    create_post: &CreatePost,
+    create_comment: &CreateComment,
+) -> Result<(), String> {
+    let payload = payload
+        .as_ref()
+        .ok_or_else(|| "payload is not valid JSON".to_string())?;
+
+    let field = |name: &str| -> Result<String, String> {
+        payload
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("missing or invalid field '{name}'"))
+    };
+
+    match topic {
+        POST_CREATE_REQUEST_TOPIC => {
+            let topic_id = field("topic_id")?;
+            let title = field("title")?;
+            let slug = field("slug")?;
+            let body = field("body")?;
+            create_post
+                .execute(topic_id, title, slug, body)
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+        }
+        COMMENT_CREATE_REQUEST_TOPIC => {
+            let post_id = field("post_id")?;
+            let body = field("body")?;
+            create_comment
+                .execute(post_id, body)
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+        }
+        other => Err(format!("unexpected topic: {other}")),
     }
 }
