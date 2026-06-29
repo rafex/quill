@@ -102,3 +102,31 @@ registrada condiciona el diseno o la implementacion.
   errores de integridad referencial; ese caso ahora se reporta como
   error genérico con el mensaje real de SQLite.
 - Reemplaza: `none`
+
+### DEC-0005 - Se descarta NATS como bus de eventos
+
+- Fecha: 2026-06-28
+- Estado: `accepted`
+- Relacionado con specs: SPEC-USERS-0001, SPEC-CONTENT-0001, SPEC-SEARCH-0001
+- Relacionado con tareas: `none`
+- Contexto: se evaluó reemplazar MQTT/Mosquitto por NATS (con JetStream)
+  como bus de eventos entre microservicios. NATS/JetStream ofrece
+  persistencia y entrega at-least-once a nivel de broker, lo que podría
+  simplificar o reemplazar parte del patrón Inbox/Outbox implementado a
+  mano en SQLite.
+- Decision: mantener MQTT/Mosquitto. Motivos: (1) MQTT ya está validado
+  end-to-end con un broker Mosquitto real en los tres microservicios
+  (`users-service`, `content-service`, `search-service`); (2) Mosquitto
+  tiene una huella de recursos significativamente menor que un servidor
+  NATS, y esa huella mínima en Raspberry Pi/VPS pequeños es una
+  restricción explícita documentada en `STACK.md` y `PRODUCT.md`, no un
+  detalle de implementación negociable; (3) el costo de migrar (rehacer
+  `infrastructure/mqtt.rs` en los tres servicios y volver a validar todo
+  el pipeline) no se justifica sin una razón concreta que lo amerite.
+- Consecuencias: el patrón Inbox/Outbox en SQLite sigue siendo
+  responsabilidad de cada servicio (no se delega al broker). Si en el
+  futuro ese patrón se vuelve costoso de mantener o aparece un requisito
+  real de persistencia/replay a nivel de broker, esta decision debe
+  revisarse explícitamente — no descartar NATS por inercia sin releer
+  este registro.
+- Reemplaza: `none`
