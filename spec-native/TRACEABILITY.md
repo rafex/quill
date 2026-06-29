@@ -24,3 +24,4 @@ la relacion antes de continuar.
 | Spec | Estado | Tareas | Decisiones | Archivos principales | Validacion | Observaciones |
 | --- | --- | --- | --- | --- | --- | --- |
 | SPEC-0001 | done | TASK-0001, TASK-0002 | DEC-0001 | `src/auth/*` | `npm test` | |
+| SPEC-USERS-0001 | done | TASK-USERS-0001, TASK-USERS-0002, TASK-USERS-0003, TASK-USERS-0004 | none | `users-service/*` | `cargo test` (11/11) + walkthrough manual contra Mosquitto real (HTTP -> outbox -> MQTT -> inbox idempotente) | Plantilla de referencia hexagonal para content-service y search-service |
