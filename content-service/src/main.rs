@@ -11,7 +11,7 @@ use adapters::{
     MqttEventPublisher, SqliteCategoryRepository, SqliteCommentRepository, SqlitePostRepository,
     SqliteTopicRepository,
 };
-use application::{CreateComment, CreatePost};
+use application::{CreateComment, CreatePost, ReindexContent};
 use infrastructure::{db, inbox_worker, mqtt, outbox_publisher};
 use ports::{CommentRepository, PostRepository};
 use rumqttc::QoS;
@@ -19,6 +19,7 @@ use transport::AppState;
 
 const POST_CREATE_REQUEST_TOPIC: &str = "forum.post.create.request";
 const COMMENT_CREATE_REQUEST_TOPIC: &str = "forum.comment.create.request";
+const REINDEX_REQUEST_TOPIC: &str = "forum.search.reindex.request";
 const DEADLETTER_TOPIC: &str = "forum.deadletter";
 
 fn db_path() -> String {
@@ -118,13 +119,18 @@ fn process_inbox() {
     let conn = Arc::new(Mutex::new(open_db()));
     let posts: Arc<dyn PostRepository> = Arc::new(SqlitePostRepository::new(conn.clone()));
     let comments: Arc<dyn CommentRepository> = Arc::new(SqliteCommentRepository::new(conn.clone()));
-    let create_post = CreatePost::new(posts);
-    let create_comment = CreateComment::new(comments);
+    let create_post = CreatePost::new(posts.clone());
+    let create_comment = CreateComment::new(comments.clone());
+    let reindex_content = ReindexContent::new(posts, comments);
 
     let (client, mut connection) =
         mqtt::connect("content-service-inbox", &mqtt_host(), mqtt_port());
 
-    for topic in [POST_CREATE_REQUEST_TOPIC, COMMENT_CREATE_REQUEST_TOPIC] {
+    for topic in [
+        POST_CREATE_REQUEST_TOPIC,
+        COMMENT_CREATE_REQUEST_TOPIC,
+        REINDEX_REQUEST_TOPIC,
+    ] {
         client
             .subscribe(topic, QoS::AtLeastOnce)
             .expect("failed to subscribe to inbox topic");
@@ -150,7 +156,13 @@ fn process_inbox() {
                     &message_id,
                     &publish.topic,
                     &payload,
-                    |_| handle_create_request(&publish.topic, &parsed, &create_post, &create_comment),
+                    |_| {
+                        if publish.topic == REINDEX_REQUEST_TOPIC {
+                            handle_reindex_request(&reindex_content)
+                        } else {
+                            handle_create_request(&publish.topic, &parsed, &create_post, &create_comment)
+                        }
+                    },
                 );
 
                 match result {
@@ -189,6 +201,15 @@ fn publish_to_deadletter(
     if let Err(e) = client.publish(DEADLETTER_TOPIC, QoS::AtLeastOnce, false, envelope) {
         eprintln!("failed to publish to {DEADLETTER_TOPIC}: {e}");
     }
+}
+
+fn handle_reindex_request(reindex_content: &ReindexContent) -> Result<(), String> {
+    reindex_content
+        .execute()
+        .map(|(posts, comments)| {
+            println!("reindex queued {posts} post(s) and {comments} comment(s) for republishing; run publish-outbox to flush them");
+        })
+        .map_err(|e| format!("{e:?}"))
 }
 
 fn handle_create_request(

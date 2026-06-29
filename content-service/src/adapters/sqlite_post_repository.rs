@@ -46,25 +46,13 @@ impl PostRepository for SqlitePostRepository {
         )
         .map_err(map_insert_error)?;
 
-        let payload = json!({
-            "id": post.id,
-            "topic_id": post.topic_id,
-            "title": post.title,
-            "slug": post.slug,
-            "body": post.body,
-            "created_at": post.created_at,
-        })
-        .to_string();
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let payload = post_created_payload(post, &event_id);
 
         tx.execute(
             "INSERT INTO outbox_events (id, topic, payload, created_at, published_at)
              VALUES (?1, ?2, ?3, ?4, NULL)",
-            params![
-                uuid::Uuid::new_v4().to_string(),
-                POST_CREATED_TOPIC,
-                payload,
-                now_timestamp()
-            ],
+            params![event_id, POST_CREATED_TOPIC, payload, now_timestamp()],
         )
         .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
 
@@ -91,6 +79,65 @@ impl PostRepository for SqlitePostRepository {
         .optional()
         .map_err(|e| RepositoryError::Unknown(e.to_string()))
     }
+
+    fn republish_all(&self) -> Result<usize, RepositoryError> {
+        let mut conn = self.conn.lock().unwrap();
+        let posts: Vec<Post> = {
+            let mut stmt = conn
+                .prepare("SELECT id, topic_id, title, slug, body, created_at FROM posts")
+                .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let body: Vec<u8> = row.get(4)?;
+                    Ok(Post {
+                        id: row.get(0)?,
+                        topic_id: row.get(1)?,
+                        title: row.get(2)?,
+                        slug: row.get(3)?,
+                        body: compression::decompress(&body),
+                        created_at: row.get(5)?,
+                    })
+                })
+                .map_err(|e| RepositoryError::Unknown(e.to_string()))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+            rows
+        };
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+        for post in &posts {
+            let event_id = uuid::Uuid::new_v4().to_string();
+            let payload = post_created_payload(post, &event_id);
+            tx.execute(
+                "INSERT INTO outbox_events (id, topic, payload, created_at, published_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL)",
+                params![event_id, POST_CREATED_TOPIC, payload, now_timestamp()],
+            )
+            .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+        }
+        tx.commit().map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+
+        Ok(posts.len())
+    }
+}
+
+/// `event_id` identifies this specific emission (distinct from the
+/// post's own `id`) so that re-publishing the same post (e.g. a
+/// reindex) produces a payload the consumer's inbox treats as a new
+/// message instead of silently deduping it away.
+fn post_created_payload(post: &Post, event_id: &str) -> String {
+    json!({
+        "event_id": event_id,
+        "id": post.id,
+        "topic_id": post.topic_id,
+        "title": post.title,
+        "slug": post.slug,
+        "body": post.body,
+        "created_at": post.created_at,
+    })
+    .to_string()
 }
 
 fn map_insert_error(error: rusqlite::Error) -> RepositoryError {
@@ -211,5 +258,41 @@ mod tests {
 
         assert_eq!(original_len as usize, body.len());
         assert!((stored_len as usize) < body.len());
+    }
+
+    #[test]
+    fn republish_all_writes_a_fresh_outbox_event_per_post() {
+        let (repo, topic_id) = repository();
+        let post = Post::new(
+            topic_id,
+            "Hello".to_string(),
+            "hello".to_string(),
+            "body".to_string(),
+        )
+        .unwrap();
+        repo.insert(&post).unwrap();
+
+        let republished = repo.republish_all().unwrap();
+        assert_eq!(republished, 1);
+
+        let conn = repo.conn.lock().unwrap();
+        let event_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM outbox_events WHERE topic = ?1",
+                params![POST_CREATED_TOPIC],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // one from insert() + one from republish_all()
+        assert_eq!(event_count, 2);
+
+        let distinct_event_ids: i64 = conn
+            .query_row(
+                "SELECT count(DISTINCT id) FROM outbox_events WHERE topic = ?1",
+                params![POST_CREATED_TOPIC],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct_event_ids, 2);
     }
 }

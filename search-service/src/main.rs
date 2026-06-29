@@ -212,7 +212,17 @@ fn process_inbox() {
                     continue;
                 };
 
-                let message_id = format!("{}:{}", publish.topic, ext_id);
+                // Use the producer's event_id (unique per emission) for
+                // inbox dedup, not the content's own id - otherwise a
+                // reindex re-publishing the same post would be silently
+                // skipped as an already-processed duplicate.
+                let event_id = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("event_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| ext_id.clone());
+                let message_id = format!("{}:{}", publish.topic, event_id);
 
                 let result = inbox_worker::process_with_retry(
                     &conn,

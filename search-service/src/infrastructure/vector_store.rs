@@ -55,6 +55,19 @@ impl VectorStore {
         Ok(id)
     }
 
+    /// Deletes any existing embedding(s) for `ext_id`. Call before
+    /// `insert` to upsert by content id rather than accumulating
+    /// duplicate rows on reindex.
+    pub fn delete_by_ext_id(&self, ext_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM vec_items WHERE rowid IN (SELECT rowid FROM embeddings WHERE ext_id = ?1)",
+            params![ext_id],
+        )?;
+        conn.execute("DELETE FROM embeddings WHERE ext_id = ?1", params![ext_id])?;
+        Ok(())
+    }
+
     pub fn query_similar(&self, vector: &[f32], k: usize) -> rusqlite::Result<Vec<SimilarMatch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

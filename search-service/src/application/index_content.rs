@@ -55,6 +55,12 @@ impl IndexContent {
             });
         }
 
+        // Upsert by ext_id: a reindex (or any re-delivery of the same
+        // content) must replace the previous embedding/FTS row instead
+        // of accumulating duplicates.
+        self.vector_store
+            .delete_by_ext_id(ext_id)
+            .map_err(|e| IndexContentError::Sqlite(e.to_string()))?;
         self.vector_store
             .insert(
                 ext_id,
@@ -66,6 +72,11 @@ impl IndexContent {
             .map_err(|e| IndexContentError::Sqlite(e.to_string()))?;
 
         let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM content_fts WHERE ext_id = ?1",
+            params![ext_id],
+        )
+        .map_err(|e| IndexContentError::Sqlite(e.to_string()))?;
         conn.execute(
             "INSERT INTO content_fts (ext_id, content_type, title, body) VALUES (?1, ?2, ?3, ?4)",
             params![ext_id, content_type, title, body],
@@ -119,5 +130,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(embedding_count, 1);
+    }
+
+    #[test]
+    fn reindexing_the_same_content_does_not_duplicate_rows() {
+        let use_case = index_content();
+        use_case
+            .execute("post-1", "post", "Hello", "hello world this is a post about rust")
+            .unwrap();
+        use_case
+            .execute("post-1", "post", "Hello updated", "an updated body about sqlite")
+            .unwrap();
+
+        let conn = use_case.conn.lock().unwrap();
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM content_fts WHERE ext_id = 'post-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1);
+
+        let embedding_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM embeddings WHERE ext_id = 'post-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(embedding_count, 1);
+
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM content_fts WHERE ext_id = 'post-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Hello updated");
     }
 }

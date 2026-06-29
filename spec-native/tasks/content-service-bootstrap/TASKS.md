@@ -116,3 +116,23 @@ transport HTTP. La idempotencia usa `request_id` del payload como
 `message_id` del Inbox. `forum.post.created`/`forum.comment.created` se
 siguen publicando solos via el Outbox ya existente — no hubo que tocar
 los repositorios.
+
+### TASK-CONTENT-0007 - forum.search.reindex.request
+
+```toml
+id = "TASK-CONTENT-0007"
+title = "Reemitir outbox events de todo el contenido existente"
+state = "done"
+owner = "platform"
+dependencies = ["TASK-CONTENT-0006"]
+expected_files = ["content-service/src/ports/post_repository.rs", "content-service/src/ports/comment_repository.rs", "content-service/src/adapters/sqlite_post_repository.rs", "content-service/src/adapters/sqlite_comment_repository.rs", "content-service/src/application/reindex_content.rs", "content-service/src/main.rs"]
+close_criteria = "forum.search.reindex.request genera un outbox_event fresco (event_id propio) por cada post/comentario existente, sin tocar las tablas posts/comments"
+validation = ["tests de integracion: republish_all crea event_id distintos sin duplicar filas en posts/comments", "walkthrough manual end-to-end: indexar un post, pedir reindex, publicar y consumir de nuevo, confirmar que search-service no duplica filas (ver DEC-0008)"]
+```
+
+Agrega `republish_all` al port `PostRepository`/`CommentRepository`
+(vive en el adapter, los casos de uso siguen sin tocar SQLite
+directamente) y el caso de uso `ReindexContent` que lo orquesta para
+ambos repositorios. Requirió `DEC-0008` (event_id por emision +
+upsert por ext_id en `search-service`) para que el reindex realmente
+reprocese en vez de ser descartado como duplicado.

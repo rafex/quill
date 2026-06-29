@@ -208,3 +208,35 @@ registrada condiciona el diseno o la implementacion.
   los delays esperados y termina publicando a `forum.deadletter` con el
   error real de SQLite.
 - Reemplaza: `none`
+
+### DEC-0008 - event_id por emision + upsert por ext_id para soportar reindex
+
+- Fecha: 2026-06-29
+- Estado: `accepted`
+- Relacionado con specs: SPEC-CONTENT-0001, SPEC-SEARCH-0001
+- Relacionado con tareas: `none` (trabajo transversal)
+- Contexto: para implementar `forum.search.reindex.request` se necesitaba
+  que `content-service` pudiera re-publicar `forum.post.created`/
+  `forum.comment.created` para contenido ya existente. Esto choca con dos
+  cosas ya construidas: (1) el `message_id` del Inbox de `search-service`
+  se derivaba del `id` del contenido, así que una republicación del mismo
+  post se ignoraba como duplicado; (2) `IndexContent::execute` hacía un
+  `INSERT` ciego en `embeddings`/`content_fts`, así que si lograba pasar
+  el Inbox, habría generado filas duplicadas para el mismo `ext_id`.
+- Decision: cada fila de `outbox_events` ahora lleva su propio `event_id`
+  (distinto del `id` del post/comentario) incluido en el payload
+  publicado; `search-service` deriva el `message_id` del Inbox de ese
+  `event_id` (con fallback al `id` del contenido si falta, por si llega
+  un payload de otro origen sin ese campo). `IndexContent::execute` pasa
+  a ser upsert por `ext_id`: borra la fila vieja de `embeddings`/
+  `vec_items`/`content_fts` antes de insertar la nueva
+  (`VectorStore::delete_by_ext_id`).
+- Consecuencias: este upsert corrige también un bug latente que ya
+  existía antes del reindex — cualquier redelivery de
+  `forum.post.created` para el mismo post (aunque no fuera un reindex
+  deliberado) ya habría producido filas duplicadas en `search.sqlite`.
+- Validado contra Mosquitto real: indexar un post, pedir
+  `forum.search.reindex.request`, publicar y consumir de nuevo —
+  `embeddings`/`content_fts` se mantienen en 1 fila por post (no 2), y
+  el log muestra `indexed` (reprocesado), no `skipped`.
+- Reemplaza: `none`

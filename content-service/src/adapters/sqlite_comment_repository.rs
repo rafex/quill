@@ -44,23 +44,13 @@ impl CommentRepository for SqliteCommentRepository {
         )
         .map_err(map_insert_error)?;
 
-        let payload = json!({
-            "id": comment.id,
-            "post_id": comment.post_id,
-            "body": comment.body,
-            "created_at": comment.created_at,
-        })
-        .to_string();
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let payload = comment_created_payload(comment, &event_id);
 
         tx.execute(
             "INSERT INTO outbox_events (id, topic, payload, created_at, published_at)
              VALUES (?1, ?2, ?3, ?4, NULL)",
-            params![
-                uuid::Uuid::new_v4().to_string(),
-                COMMENT_CREATED_TOPIC,
-                payload,
-                now_timestamp()
-            ],
+            params![event_id, COMMENT_CREATED_TOPIC, payload, now_timestamp()],
         )
         .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
 
@@ -85,6 +75,60 @@ impl CommentRepository for SqliteCommentRepository {
         .optional()
         .map_err(|e| RepositoryError::Unknown(e.to_string()))
     }
+
+    fn republish_all(&self) -> Result<usize, RepositoryError> {
+        let mut conn = self.conn.lock().unwrap();
+        let comments: Vec<Comment> = {
+            let mut stmt = conn
+                .prepare("SELECT id, post_id, body, created_at FROM comments")
+                .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let body: Vec<u8> = row.get(2)?;
+                    Ok(Comment {
+                        id: row.get(0)?,
+                        post_id: row.get(1)?,
+                        body: compression::decompress(&body),
+                        created_at: row.get(3)?,
+                    })
+                })
+                .map_err(|e| RepositoryError::Unknown(e.to_string()))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+            rows
+        };
+
+        let tx = conn
+            .transaction()
+            .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+        for comment in &comments {
+            let event_id = uuid::Uuid::new_v4().to_string();
+            let payload = comment_created_payload(comment, &event_id);
+            tx.execute(
+                "INSERT INTO outbox_events (id, topic, payload, created_at, published_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL)",
+                params![event_id, COMMENT_CREATED_TOPIC, payload, now_timestamp()],
+            )
+            .map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+        }
+        tx.commit().map_err(|e| RepositoryError::Unknown(e.to_string()))?;
+
+        Ok(comments.len())
+    }
+}
+
+/// `event_id` identifies this specific emission (distinct from the
+/// comment's own `id`) so a reindex emission isn't deduped away by the
+/// consumer's inbox as if it were the original creation event.
+fn comment_created_payload(comment: &Comment, event_id: &str) -> String {
+    json!({
+        "event_id": event_id,
+        "id": comment.id,
+        "post_id": comment.post_id,
+        "body": comment.body,
+        "created_at": comment.created_at,
+    })
+    .to_string()
 }
 
 fn map_insert_error(error: rusqlite::Error) -> RepositoryError {
@@ -188,5 +232,25 @@ mod tests {
 
         assert_eq!(topic, COMMENT_CREATED_TOPIC);
         assert_eq!(published_at, None);
+    }
+
+    #[test]
+    fn republish_all_writes_a_fresh_outbox_event_per_comment() {
+        let (repo, post_id) = repository();
+        let comment = Comment::new(post_id, "nice".to_string()).unwrap();
+        repo.insert(&comment).unwrap();
+
+        let republished = repo.republish_all().unwrap();
+        assert_eq!(republished, 1);
+
+        let conn = repo.conn.lock().unwrap();
+        let distinct_event_ids: i64 = conn
+            .query_row(
+                "SELECT count(DISTINCT id) FROM outbox_events WHERE topic = ?1",
+                params![COMMENT_CREATED_TOPIC],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct_event_ids, 2);
     }
 }

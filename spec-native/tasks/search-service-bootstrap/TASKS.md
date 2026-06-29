@@ -116,3 +116,21 @@ expected_files = ["search-service/src/application/hybrid_search.rs", "search-ser
 close_criteria = "GET /search?q=... combina vector y FTS5 con score = 0.60*vector + 0.40*bm25 y devuelve resultados ordenados por score"
 validation = ["test unitario de la formula de combinacion de scores", "walkthrough manual end-to-end: indexar contenido real y buscarlo"]
 ```
+
+### TASK-SEARCH-0007 - Upsert por ext_id (soporte de reindex)
+
+```toml
+id = "TASK-SEARCH-0007"
+title = "IndexContent upsert por ext_id + message_id por event_id"
+state = "done"
+owner = "platform"
+dependencies = ["TASK-SEARCH-0004"]
+expected_files = ["search-service/src/infrastructure/vector_store.rs", "search-service/src/application/index_content.rs", "search-service/src/main.rs"]
+close_criteria = "Reindexar el mismo contenido (forum.search.reindex.request en content-service) no duplica filas en embeddings/content_fts, y el mensaje se reprocesa (no se descarta como duplicado)"
+validation = ["test: reindexar el mismo ext_id no duplica filas", "walkthrough manual end-to-end con content-service: indexar, reindexar, confirmar conteo de filas sin cambios"]
+```
+
+Bug latente corregido en el camino: `IndexContent::execute` hacia
+`INSERT` ciego, asi que cualquier redelivery de `forum.post.created`
+para el mismo post ya habria duplicado filas, incluso sin reindex
+deliberado. Ver `DEC-0008`.
