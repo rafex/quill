@@ -6,43 +6,56 @@ Lista de comandos operativos del proyecto.
 
 Reducir la ambiguedad de ejecucion para agentes y humanos.
 
-## Template
+> Nota: el código Rust aún no existe en el repo. Estos comandos describen
+> el contrato esperado por servicio (`users-service`, `content-service`,
+> `search-service`) una vez creados como crates independientes; ajustar
+> según la estructura real de workspace cuando se implemente.
 
 ### Setup
 
 ```bash
-# instalar dependencias
+# por servicio (ejemplo content-service)
+cd content-service && cargo build
 ```
 
 ### Desarrollo
 
 ```bash
-# iniciar app
+# levantar broker MQTT local (Mosquitto)
+mosquitto -c mosquitto.conf
+
+# iniciar un servicio
+cargo run -p content-service
 ```
 
 ### Tests
 
 ```bash
-# correr tests
+cargo test --workspace
 ```
 
 ### Lint y formato
 
 ```bash
-# lint
-# format
+cargo fmt --all
+cargo clippy --workspace -- -D warnings
 ```
 
 ### Build
 
 ```bash
-# build
+cargo build --release --workspace
 ```
 
-### Utilidad
+### Utilidad (CLI por servicio)
 
 ```bash
-# seed
-# migrate
-# generar tipos
+cargo run -p content-service -- init-db
+cargo run -p content-service -- migrate
+cargo run -p content-service -- vacuum
+cargo run -p search-service -- rebuild-fts
+cargo run -p search-service -- reindex
+cargo run -p content-service -- stats
+cargo run -p content-service -- publish-outbox
+cargo run -p content-service -- process-inbox
 ```

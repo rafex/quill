@@ -1,2 +1,8 @@
 # SpecNative — venv is generated; do not commit
 .specnative/.venv/
+
+# Rust
+/target/
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm
