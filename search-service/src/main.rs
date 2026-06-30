@@ -13,11 +13,13 @@ use infrastructure::{db, inbox_worker, mqtt};
 use ports::EmbeddingProvider;
 use rumqttc::QoS;
 use transport::AppState;
+use tracing_subscriber::EnvFilter;
 
 const POST_CREATED_TOPIC: &str = "forum.post.created";
 const COMMENT_CREATED_TOPIC: &str = "forum.comment.created";
 const EMBEDDING_REQUEST_TOPIC: &str = "forum.embedding.generate.request";
 const EMBEDDING_RESPONSE_TOPIC: &str = "forum.embedding.generated";
+const DEADLETTER_TOPIC: &str = "forum.deadletter";
 
 fn db_path() -> String {
     std::env::var("SEARCH_DB_PATH").unwrap_or_else(|_| "search.sqlite".to_string())
@@ -34,7 +36,13 @@ fn mqtt_port() -> u16 {
         .unwrap_or(1883)
 }
 
-const DEADLETTER_TOPIC: &str = "forum.deadletter";
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+}
 
 fn publish_to_deadletter(
     client: &rumqttc::Client,
@@ -52,7 +60,7 @@ fn publish_to_deadletter(
     .to_string();
 
     if let Err(e) = client.publish(DEADLETTER_TOPIC, QoS::AtLeastOnce, false, envelope) {
-        eprintln!("failed to publish to {DEADLETTER_TOPIC}: {e}");
+        tracing::error!(topic = DEADLETTER_TOPIC, error = %e, "failed to publish to deadletter");
     }
 }
 
@@ -73,7 +81,7 @@ fn build_embedding_provider() -> Arc<dyn EmbeddingProvider> {
         "stub" => Arc::new(StubEmbeddingProvider),
         "onnx" => load_onnx_provider(),
         other => {
-            eprintln!("unknown SEARCH_EMBEDDING_PROVIDER '{other}', falling back to stub");
+            tracing::warn!(provider = other, "unknown SEARCH_EMBEDDING_PROVIDER, falling back to stub");
             Arc::new(StubEmbeddingProvider)
         }
     }
@@ -103,17 +111,23 @@ fn main() {
     let command = std::env::args().nth(1).unwrap_or_else(|| "help".to_string());
 
     match command.as_str() {
+        "stats" => { stats(); return; }
+        "vacuum" => { vacuum(); return; }
+        _ => {}
+    }
+
+    init_tracing();
+
+    match command.as_str() {
         "init-db" => {
             let path = db_path();
             let conn = db::open(&path).expect("failed to open sqlite connection");
             db::init_schema(&conn).expect("failed to initialize schema");
-            println!("initialized {path}");
+            tracing::info!(db = path, "database initialized");
         }
         "process-inbox" => process_inbox(),
         "serve" => serve(),
         "download-model" => download_model(),
-        "vacuum" => vacuum(),
-        "stats" => stats(),
         other => {
             eprintln!("unknown command: {other}");
             eprintln!("available commands: init-db, process-inbox, serve, download-model, vacuum, stats");
@@ -177,7 +191,7 @@ fn serve() {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .expect("failed to bind http listener");
-        println!("search-service listening on {addr}");
+        tracing::info!(addr, "search-service listening");
         axum::serve(listener, transport::router(state))
             .await
             .expect("http server failed");
@@ -209,7 +223,7 @@ fn process_inbox() {
         client
             .subscribe(topic, QoS::AtLeastOnce)
             .expect("failed to subscribe to inbox topic");
-        println!("listening on {topic}");
+        tracing::info!(topic, "inbox listening");
     }
 
     for notification in connection.iter() {
@@ -230,8 +244,8 @@ fn process_inbox() {
                 }
             }
             Ok(_) => {}
-            Err(error) => {
-                eprintln!("mqtt connection error: {error}");
+            Err(ref error) => {
+                tracing::error!(error = %error, "mqtt connection error");
                 break;
             }
         }
@@ -266,7 +280,7 @@ fn handle_index_request(
     let content_type = if topic.contains("comment") { "comment" } else { "post" };
 
     let (Some(ext_id), Some(body)) = (ext_id, body) else {
-        eprintln!("skipping malformed message on {topic}: {payload}");
+        tracing::warn!(topic, "skipping malformed message");
         return;
     };
 
@@ -281,6 +295,8 @@ fn handle_index_request(
         .unwrap_or_else(|| ext_id.clone());
     let message_id = format!("{topic}:{event_id}");
 
+    tracing::debug!(message_id, topic, ext_id, content_type, "received index request");
+
     let result = inbox_worker::process_with_retry(
         conn,
         &message_id,
@@ -294,11 +310,11 @@ fn handle_index_request(
     );
 
     match result {
-        Ok(true) => println!("indexed {content_type} {ext_id}"),
-        Ok(false) => println!("skipped already-processed message {message_id}"),
-        Err(error) => {
-            eprintln!("giving up on message {message_id}: {error}");
-            publish_to_deadletter(client, topic, &message_id, payload, &error);
+        Ok(true) => tracing::info!(message_id, ext_id, content_type, "indexed"),
+        Ok(false) => tracing::debug!(message_id, "skipped already-processed message"),
+        Err(ref error) => {
+            tracing::error!(message_id, error, "giving up, sending to deadletter");
+            publish_to_deadletter(client, topic, &message_id, payload, error);
         }
     }
 }
@@ -322,7 +338,7 @@ fn handle_embedding_request(
     let parsed: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("malformed {topic} payload: {e}");
+            tracing::warn!(topic, error = %e, "malformed embedding request payload");
             return;
         }
     };
@@ -330,17 +346,19 @@ fn handle_embedding_request(
     let request_id = match parsed.get("request_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => {
-            eprintln!("missing request_id in {topic}: {payload}");
+            tracing::warn!(topic, "missing request_id in embedding request");
             return;
         }
     };
     let text = match parsed.get("text").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => {
-            eprintln!("missing text in {topic}: {payload}");
+            tracing::warn!(request_id, topic, "missing text in embedding request");
             return;
         }
     };
+
+    tracing::debug!(request_id, model = embedding_provider.model_name(), "generating embedding");
 
     let embedding = embedding_provider.embed(&text);
     let response = serde_json::json!({
@@ -353,8 +371,13 @@ fn handle_embedding_request(
     .to_string();
 
     if let Err(e) = client.publish(EMBEDDING_RESPONSE_TOPIC, QoS::AtLeastOnce, false, response) {
-        eprintln!("failed to publish to {EMBEDDING_RESPONSE_TOPIC}: {e}");
+        tracing::error!(request_id, topic = EMBEDDING_RESPONSE_TOPIC, error = %e, "failed to publish embedding response");
     } else {
-        println!("generated embedding for request {request_id} ({} dims)", embedding_provider.dimension());
+        tracing::info!(
+            request_id,
+            model = embedding_provider.model_name(),
+            dimension = embedding_provider.dimension(),
+            "embedding generated"
+        );
     }
 }

@@ -18,11 +18,11 @@ pub fn download_model(model_dir: &str) -> Result<(), String> {
 
 fn download_file(url: &str, dest: &str) -> Result<(), String> {
     if Path::new(dest).exists() {
-        println!("skipping {dest} (already exists)");
+        tracing::info!(dest, "skipping download (file already exists)");
         return Ok(());
     }
 
-    println!("downloading {url} -> {dest}");
+    tracing::info!(url, dest, "downloading model file");
     let response = ureq::get(url)
         .call()
         .map_err(|e| format!("request to {url} failed: {e}"))?;
@@ -36,6 +36,6 @@ fn download_file(url: &str, dest: &str) -> Result<(), String> {
     let mut file = fs::File::create(dest).map_err(|e| e.to_string())?;
     file.write_all(&bytes).map_err(|e| e.to_string())?;
 
-    println!("saved {dest} ({} bytes)", bytes.len());
+    tracing::info!(dest, bytes = bytes.len(), "model file saved");
     Ok(())
 }

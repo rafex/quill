@@ -80,10 +80,12 @@ where
         let result = process_message(conn, message_id, topic, payload, &handler);
         match result {
             Err(error) if attempt < RETRY_BACKOFF.len() => {
-                eprintln!(
-                    "attempt {} for {message_id} failed: {error}; retrying in {:?}",
-                    attempt + 1,
-                    RETRY_BACKOFF[attempt]
+                tracing::warn!(
+                    message_id,
+                    attempt = attempt + 1,
+                    retry_in_ms = RETRY_BACKOFF[attempt].as_millis(),
+                    error,
+                    "message handler failed, retrying"
                 );
                 std::thread::sleep(RETRY_BACKOFF[attempt]);
                 attempt += 1;

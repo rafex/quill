@@ -16,6 +16,7 @@ use infrastructure::{db, inbox_worker, mqtt, outbox_publisher};
 use ports::{CommentRepository, PostRepository};
 use rumqttc::QoS;
 use transport::AppState;
+use tracing_subscriber::EnvFilter;
 
 const POST_CREATE_REQUEST_TOPIC: &str = "forum.post.create.request";
 const COMMENT_CREATE_REQUEST_TOPIC: &str = "forum.comment.create.request";
@@ -37,21 +38,35 @@ fn mqtt_port() -> u16 {
         .unwrap_or(1883)
 }
 
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+}
+
 fn main() {
     let command = std::env::args().nth(1).unwrap_or_else(|| "help".to_string());
+
+    match command.as_str() {
+        "stats" => { stats(); return; }
+        "vacuum" => { vacuum(); return; }
+        _ => {}
+    }
+
+    init_tracing();
 
     match command.as_str() {
         "init-db" => {
             let path = db_path();
             let conn = db::open(&path).expect("failed to open sqlite connection");
             db::init_schema(&conn).expect("failed to initialize schema");
-            println!("initialized {path}");
+            tracing::info!(db = path, "database initialized");
         }
         "serve" => serve(),
         "publish-outbox" => publish_outbox(),
         "process-inbox" => process_inbox(),
-        "vacuum" => vacuum(),
-        "stats" => stats(),
         "reindex" => reindex(),
         other => {
             eprintln!("unknown command: {other}");
@@ -89,7 +104,7 @@ fn serve() {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .expect("failed to bind http listener");
-        println!("content-service listening on {addr}");
+        tracing::info!(addr, "content-service listening");
         axum::serve(listener, transport::router(state))
             .await
             .expect("http server failed");
@@ -112,10 +127,8 @@ fn publish_outbox() {
 
     let publisher = MqttEventPublisher::new(client);
     let published = outbox_publisher::publish_pending(&conn, &publisher);
-    // give the background event loop time to flush the publish over the network
-    // before the process exits.
     std::thread::sleep(std::time::Duration::from_millis(300));
-    println!("published {published} event(s)");
+    tracing::info!(published, "outbox flushed");
 }
 
 fn vacuum() {
@@ -170,7 +183,7 @@ fn reindex() {
     let (post_count, comment_count) = reindex_content
         .execute()
         .expect("failed to queue reindex events");
-    println!("queued {post_count} post(s) and {comment_count} comment(s) for reindex");
+    tracing::info!(posts = post_count, comments = comment_count, "reindex events queued");
 
     let (client, mut connection) =
         mqtt::connect("content-service-reindex", &mqtt_host(), mqtt_port());
@@ -185,7 +198,7 @@ fn reindex() {
     let publisher = MqttEventPublisher::new(client);
     let published = outbox_publisher::publish_pending(&conn, &publisher);
     std::thread::sleep(std::time::Duration::from_millis(300));
-    println!("published {published} event(s)");
+    tracing::info!(published, "outbox flushed");
 }
 
 fn process_inbox() {
@@ -207,7 +220,7 @@ fn process_inbox() {
         client
             .subscribe(topic, QoS::AtLeastOnce)
             .expect("failed to subscribe to inbox topic");
-        println!("listening on {topic}");
+        tracing::info!(topic, "inbox listening");
     }
 
     for notification in connection.iter() {
@@ -224,6 +237,8 @@ fn process_inbox() {
                     .unwrap_or_else(|| publish.pkid.to_string());
                 let message_id = format!("{}:{}", publish.topic, request_id);
 
+                tracing::debug!(message_id, topic = publish.topic, "received message");
+
                 let result = inbox_worker::process_with_retry(
                     &conn,
                     &message_id,
@@ -239,17 +254,17 @@ fn process_inbox() {
                 );
 
                 match result {
-                    Ok(true) => println!("processed {message_id}"),
-                    Ok(false) => println!("skipped already-processed message {message_id}"),
-                    Err(error) => {
-                        eprintln!("giving up on message {message_id}: {error}");
-                        publish_to_deadletter(&client, &publish.topic, &message_id, &payload, &error);
+                    Ok(true) => tracing::info!(message_id, topic = publish.topic, "processed"),
+                    Ok(false) => tracing::debug!(message_id, "skipped already-processed message"),
+                    Err(ref error) => {
+                        tracing::error!(message_id, error, "giving up, sending to deadletter");
+                        publish_to_deadletter(&client, &publish.topic, &message_id, &payload, error);
                     }
                 }
             }
             Ok(_) => {}
-            Err(error) => {
-                eprintln!("mqtt connection error: {error}");
+            Err(ref error) => {
+                tracing::error!(error = %error, "mqtt connection error");
                 break;
             }
         }
@@ -272,7 +287,7 @@ fn publish_to_deadletter(
     .to_string();
 
     if let Err(e) = client.publish(DEADLETTER_TOPIC, QoS::AtLeastOnce, false, envelope) {
-        eprintln!("failed to publish to {DEADLETTER_TOPIC}: {e}");
+        tracing::error!(topic = DEADLETTER_TOPIC, error = %e, "failed to publish to deadletter");
     }
 }
 
@@ -280,7 +295,7 @@ fn handle_reindex_request(reindex_content: &ReindexContent) -> Result<(), String
     reindex_content
         .execute()
         .map(|(posts, comments)| {
-            println!("reindex queued {posts} post(s) and {comments} comment(s) for republishing; run publish-outbox to flush them");
+            tracing::info!(posts, comments, "reindex queued; run publish-outbox to flush");
         })
         .map_err(|e| format!("{e:?}"))
 }
@@ -311,7 +326,7 @@ fn handle_create_request(
             let body = field("body")?;
             create_post
                 .execute(topic_id, title, slug, body)
-                .map(|_| ())
+                .map(|post| tracing::info!(post_id = post.id, "post created"))
                 .map_err(|e| format!("{e:?}"))
         }
         COMMENT_CREATE_REQUEST_TOPIC => {
@@ -319,7 +334,7 @@ fn handle_create_request(
             let body = field("body")?;
             create_comment
                 .execute(post_id, body)
-                .map(|_| ())
+                .map(|comment| tracing::info!(comment_id = comment.id, "comment created"))
                 .map_err(|e| format!("{e:?}"))
         }
         other => Err(format!("unexpected topic: {other}")),
