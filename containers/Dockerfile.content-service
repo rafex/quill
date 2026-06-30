@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+# Build context must be the workspace root:
+#   podman build -f containers/Dockerfile.content-service -t quill/content-service .
+
+# ── Builder ───────────────────────────────────────────────────────────────────
+FROM rust:1.96-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --release -p content-service
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/content-service /usr/local/bin/content-service
+COPY --from=builder /app/containers/dev/entrypoints/content.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+RUN mkdir -p /data
+VOLUME ["/data"]
+
+ENV CONTENT_DB_PATH=/data/content.sqlite
+ENV CONTENT_HTTP_ADDR=0.0.0.0:8081
+ENV RUST_LOG=info
+
+EXPOSE 8081
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,4 +1,4 @@
-# Justfile — operational tasks (run, DB, MQTT, reindex).
+# Justfile — operational tasks (run, DB, MQTT, reindex, containers).
 # For build tasks (compile, test, lint) use: make <target>
 #
 # Requires: just (https://github.com/casey/just)
@@ -6,6 +6,10 @@
 
 set dotenv-load := true
 set shell := ["bash", "-cu"]
+
+# Prefer podman-compose; fall back to docker compose
+COMPOSE := `command -v podman-compose 2>/dev/null || echo "docker compose"`
+COMPOSE_DEV := COMPOSE + " -f containers/dev/compose.yml"
 
 import 'scripts/db.just'
 import 'scripts/mqtt.just'
@@ -73,3 +77,52 @@ health:
 [group('smoke')]
 search q:
     curl -sf "http://localhost:8082/search?q={{q}}&limit=5" | jq .
+
+# ── Containers (dev) ──────────────────────────────────────────────────────────
+
+# Build all container images for the dev environment
+[group('containers')]
+dev-build:
+    {{COMPOSE_DEV}} build
+
+# Start the full dev stack (Mosquitto + 3 services) in the foreground
+[group('containers')]
+dev-up:
+    {{COMPOSE_DEV}} up
+
+# Start the full dev stack in the background
+[group('containers')]
+dev-up-detach:
+    {{COMPOSE_DEV}} up -d
+
+# Stop and remove containers (keeps named volumes / data)
+[group('containers')]
+dev-down:
+    {{COMPOSE_DEV}} down
+
+# Stop containers AND remove all data volumes (full reset)
+[group('containers')]
+dev-reset:
+    {{COMPOSE_DEV}} down -v
+
+# Stream logs from all services
+[group('containers')]
+dev-logs:
+    {{COMPOSE_DEV}} logs -f
+
+# Stream logs from a single service
+# Usage: just dev-logs-svc content-service
+[group('containers')]
+dev-logs-svc svc:
+    {{COMPOSE_DEV}} logs -f {{svc}}
+
+# Show running container status
+[group('containers')]
+dev-ps:
+    {{COMPOSE_DEV}} ps
+
+# Rebuild and restart a single service without touching the others
+# Usage: just dev-restart content-service
+[group('containers')]
+dev-restart svc:
+    {{COMPOSE_DEV}} up -d --build {{svc}}

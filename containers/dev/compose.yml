@@ -1,0 +1,93 @@
+# Dev environment — all services + Mosquitto in a single compose.
+# Run from the workspace root:
+#   podman-compose -f containers/dev/compose.yml up --build
+#
+# Ports exposed to host:
+#   1883  Mosquitto MQTT
+#   8080  users-service  HTTP
+#   8081  content-service HTTP
+#   8082  search-service  HTTP
+
+name: quill-dev
+
+services:
+
+  # ── Broker ────────────────────────────────────────────────────────────────
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 3s
+
+  # ── users-service ─────────────────────────────────────────────────────────
+  users-service:
+    build:
+      context: ../..
+      dockerfile: containers/Dockerfile.users-service
+    ports:
+      - "8080:8080"
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      USERS_DB_PATH: /data/users.sqlite
+      USERS_HTTP_ADDR: 0.0.0.0:8080
+      RUST_LOG: info
+    volumes:
+      - users-data:/data
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── content-service ───────────────────────────────────────────────────────
+  content-service:
+    build:
+      context: ../..
+      dockerfile: containers/Dockerfile.content-service
+    ports:
+      - "8081:8081"
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      CONTENT_DB_PATH: /data/content.sqlite
+      CONTENT_HTTP_ADDR: 0.0.0.0:8081
+      RUST_LOG: info
+    volumes:
+      - content-data:/data
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── search-service ────────────────────────────────────────────────────────
+  search-service:
+    build:
+      context: ../..
+      dockerfile: containers/Dockerfile.search-service
+    ports:
+      - "8082:8082"
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      SEARCH_DB_PATH: /data/search.sqlite
+      SEARCH_HTTP_ADDR: 0.0.0.0:8082
+      SEARCH_EMBEDDING_PROVIDER: stub
+      RUST_LOG: info
+    volumes:
+      - search-data:/data
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  users-data:
+  content-data:
+  search-data:

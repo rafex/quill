@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+# Build context must be the workspace root:
+#   podman build -f containers/Dockerfile.search-service -t quill/search-service .
+#
+# To build with real ONNX/MiniLM embeddings instead of the default stub:
+#   podman build --build-arg FEATURES=onnx-embeddings \
+#                -f containers/Dockerfile.search-service -t quill/search-service:onnx .
+
+ARG FEATURES=stub-embeddings
+
+# ── Builder ───────────────────────────────────────────────────────────────────
+FROM rust:1.96-slim-bookworm AS builder
+
+ARG FEATURES
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --release -p search-service --features "${FEATURES}"
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/search-service /usr/local/bin/search-service
+COPY --from=builder /app/containers/dev/entrypoints/search.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+RUN mkdir -p /data /models
+VOLUME ["/data"]
+VOLUME ["/models"]
+
+ENV SEARCH_DB_PATH=/data/search.sqlite
+ENV SEARCH_HTTP_ADDR=0.0.0.0:8082
+ENV SEARCH_EMBEDDING_PROVIDER=stub
+ENV SEARCH_ONNX_MODEL_DIR=/models/all-MiniLM-L6-v2
+ENV RUST_LOG=info
+
+EXPOSE 8082
+ENTRYPOINT ["/entrypoint.sh"]
