@@ -130,6 +130,26 @@ close_criteria = "Reindexar el mismo contenido (forum.search.reindex.request en 
 validation = ["test: reindexar el mismo ext_id no duplica filas", "walkthrough manual end-to-end con content-service: indexar, reindexar, confirmar conteo de filas sin cambios"]
 ```
 
+### TASK-SEARCH-0008 - forum.embedding.generate.request / forum.embedding.generated
+
+```toml
+id = "TASK-SEARCH-0008"
+title = "Topic de generacion de embeddings bajo demanda"
+state = "done"
+owner = "platform"
+dependencies = ["TASK-SEARCH-0002"]
+expected_files = ["search-service/src/main.rs"]
+close_criteria = "Un mensaje en forum.embedding.generate.request con {request_id, text} genera un embedding y publica la respuesta en forum.embedding.generated con {request_id, model, version, dimension, embedding}"
+validation = ["build limpio (14/14 tests)", "walkthrough manual: publicar un request con mosquitto_pub, confirmar respuesta en forum.embedding.generated con mosquitto_sub"]
+```
+
+Desacopla la generacion de embeddings del pipeline de indexacion: cualquier
+servicio puede solicitar un embedding via MQTT sin conocer el provider concreto
+(stub vs ONNX). No usa inbox dedup (ver DEC-0009): la generacion es stateless e
+idempotente, reintentar produce el mismo resultado. El proceso de inbox existente
+se refactorizo en dos funciones separadas (`handle_index_request` /
+`handle_embedding_request`) para mantener cada handler legible.
+
 Bug latente corregido en el camino: `IndexContent::execute` hacia
 `INSERT` ciego, asi que cualquier redelivery de `forum.post.created`
 para el mismo post ya habria duplicado filas, incluso sin reindex

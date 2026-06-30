@@ -14,6 +14,11 @@ use ports::EmbeddingProvider;
 use rumqttc::QoS;
 use transport::AppState;
 
+const POST_CREATED_TOPIC: &str = "forum.post.created";
+const COMMENT_CREATED_TOPIC: &str = "forum.comment.created";
+const EMBEDDING_REQUEST_TOPIC: &str = "forum.embedding.generate.request";
+const EMBEDDING_RESPONSE_TOPIC: &str = "forum.embedding.generated";
+
 fn db_path() -> String {
     std::env::var("SEARCH_DB_PATH").unwrap_or_else(|_| "search.sqlite".to_string())
 }
@@ -162,16 +167,17 @@ fn open_db() -> rusqlite::Connection {
 fn process_inbox() {
     let conn = Arc::new(Mutex::new(open_db()));
     let embedding_provider = build_embedding_provider();
-    let index_content = IndexContent::new(conn.clone(), embedding_provider);
+    let index_content = IndexContent::new(conn.clone(), Arc::clone(&embedding_provider));
 
     let (client, mut connection) =
         mqtt::connect("search-service-inbox", &mqtt_host(), mqtt_port());
     // MQTT wildcards ('+'/'#') only match whole levels separated by '/';
     // our topics use '.' as namespace separator, so there is no wildcard
-    // that matches both - subscribe to each topic explicitly instead.
-    let topics = std::env::var("SEARCH_INBOX_TOPICS").unwrap_or_else(|_| {
-        "forum.post.created,forum.comment.created".to_string()
-    });
+    // that covers all of them - subscribe explicitly.
+    let default_topics = format!(
+        "{POST_CREATED_TOPIC},{COMMENT_CREATED_TOPIC},{EMBEDDING_REQUEST_TOPIC}"
+    );
+    let topics = std::env::var("SEARCH_INBOX_TOPICS").unwrap_or(default_topics);
     for topic in topics.split(',') {
         client
             .subscribe(topic, QoS::AtLeastOnce)
@@ -183,66 +189,17 @@ fn process_inbox() {
         match notification {
             Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish))) => {
                 let payload = String::from_utf8_lossy(&publish.payload).to_string();
-                let parsed: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
 
-                let ext_id = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("id"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let body = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("body"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let title = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("title"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let content_type = if publish.topic.contains("comment") {
-                    "comment"
+                if publish.topic == EMBEDDING_REQUEST_TOPIC {
+                    handle_embedding_request(&client, &embedding_provider, &publish.topic, &payload);
                 } else {
-                    "post"
-                };
-
-                let (Some(ext_id), Some(body)) = (ext_id, body) else {
-                    eprintln!("skipping malformed message on {}: {payload}", publish.topic);
-                    continue;
-                };
-
-                // Use the producer's event_id (unique per emission) for
-                // inbox dedup, not the content's own id - otherwise a
-                // reindex re-publishing the same post would be silently
-                // skipped as an already-processed duplicate.
-                let event_id = parsed
-                    .as_ref()
-                    .and_then(|v| v.get("event_id"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| ext_id.clone());
-                let message_id = format!("{}:{}", publish.topic, event_id);
-
-                let result = inbox_worker::process_with_retry(
-                    &conn,
-                    &message_id,
-                    &publish.topic,
-                    &payload,
-                    |_| {
-                        index_content
-                            .execute(&ext_id, content_type, &title, &body)
-                            .map_err(|e: application::IndexContentError| e.to_string())
-                    },
-                );
-
-                match result {
-                    Ok(true) => println!("indexed {content_type} {ext_id}"),
-                    Ok(false) => println!("skipped already-processed message {message_id}"),
-                    Err(error) => {
-                        eprintln!("giving up on message {message_id}: {error}");
-                        publish_to_deadletter(&client, &publish.topic, &message_id, &payload, &error);
-                    }
+                    handle_index_request(
+                        &client,
+                        &conn,
+                        &index_content,
+                        &publish.topic,
+                        &payload,
+                    );
                 }
             }
             Ok(_) => {}
@@ -251,5 +208,126 @@ fn process_inbox() {
                 break;
             }
         }
+    }
+}
+
+fn handle_index_request(
+    client: &rumqttc::Client,
+    conn: &Arc<Mutex<rusqlite::Connection>>,
+    index_content: &IndexContent,
+    topic: &str,
+    payload: &str,
+) {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(payload).ok();
+
+    let ext_id = parsed
+        .as_ref()
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let body = parsed
+        .as_ref()
+        .and_then(|v| v.get("body"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let title = parsed
+        .as_ref()
+        .and_then(|v| v.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let content_type = if topic.contains("comment") { "comment" } else { "post" };
+
+    let (Some(ext_id), Some(body)) = (ext_id, body) else {
+        eprintln!("skipping malformed message on {topic}: {payload}");
+        return;
+    };
+
+    // Use the producer's event_id (unique per emission) for inbox dedup, not
+    // the content's own id - otherwise a reindex re-publishing the same post
+    // would be silently skipped as an already-processed duplicate (DEC-0008).
+    let event_id = parsed
+        .as_ref()
+        .and_then(|v| v.get("event_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| ext_id.clone());
+    let message_id = format!("{topic}:{event_id}");
+
+    let result = inbox_worker::process_with_retry(
+        conn,
+        &message_id,
+        topic,
+        payload,
+        |_| {
+            index_content
+                .execute(&ext_id, content_type, &title, &body)
+                .map_err(|e: application::IndexContentError| e.to_string())
+        },
+    );
+
+    match result {
+        Ok(true) => println!("indexed {content_type} {ext_id}"),
+        Ok(false) => println!("skipped already-processed message {message_id}"),
+        Err(error) => {
+            eprintln!("giving up on message {message_id}: {error}");
+            publish_to_deadletter(client, topic, &message_id, payload, &error);
+        }
+    }
+}
+
+/// Handles forum.embedding.generate.request: generates an embedding for the
+/// given text and publishes the result to forum.embedding.generated.
+///
+/// Request payload:  { "request_id": "<uuid>", "text": "<text to embed>" }
+/// Response payload: { "request_id": "<uuid>", "model": "...", "version": "...",
+///                     "dimension": N, "embedding": [f32, ...] }
+///
+/// No inbox dedup here: embedding generation is stateless and idempotent by
+/// nature - the same text always produces the same embedding. Retrying is safe
+/// so there is no value in storing processed message_ids for this topic.
+fn handle_embedding_request(
+    client: &rumqttc::Client,
+    embedding_provider: &Arc<dyn EmbeddingProvider>,
+    topic: &str,
+    payload: &str,
+) {
+    let parsed: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("malformed {topic} payload: {e}");
+            return;
+        }
+    };
+
+    let request_id = match parsed.get("request_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => {
+            eprintln!("missing request_id in {topic}: {payload}");
+            return;
+        }
+    };
+    let text = match parsed.get("text").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => {
+            eprintln!("missing text in {topic}: {payload}");
+            return;
+        }
+    };
+
+    let embedding = embedding_provider.embed(&text);
+    let response = serde_json::json!({
+        "request_id": request_id,
+        "model": embedding_provider.model_name(),
+        "version": embedding_provider.model_version(),
+        "dimension": embedding_provider.dimension(),
+        "embedding": embedding,
+    })
+    .to_string();
+
+    if let Err(e) = client.publish(EMBEDDING_RESPONSE_TOPIC, QoS::AtLeastOnce, false, response) {
+        eprintln!("failed to publish to {EMBEDDING_RESPONSE_TOPIC}: {e}");
+    } else {
+        println!("generated embedding for request {request_id} ({} dims)", embedding_provider.dimension());
     }
 }

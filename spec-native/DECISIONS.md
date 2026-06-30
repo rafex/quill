@@ -209,6 +209,28 @@ registrada condiciona el diseno o la implementacion.
   error real de SQLite.
 - Reemplaza: `none`
 
+### DEC-0009 - forum.embedding.generate.request sin inbox dedup
+
+- Fecha: 2026-06-29
+- Estado: `accepted`
+- Relacionado con specs: SPEC-SEARCH-0001
+- Relacionado con tareas: TASK-SEARCH-0008
+- Contexto: el topic `forum.embedding.generate.request` / `forum.embedding.generated`
+  desacopla la generación de embeddings del pipeline de indexación. A diferencia de los
+  demás handlers de `process-inbox`, la generación de embeddings es **stateless e
+  idempotente por naturaleza**: el mismo texto siempre produce el mismo embedding
+  (para el mismo provider/modelo). Guardar el `message_id` en `inbox_messages` para
+  este topic solo añadiría escrituras sin aportar garantía real de corrección.
+- Decision: `handle_embedding_request` no usa el patrón Inbox (no llama a
+  `process_with_retry` ni a `inbox_messages`). Si el broker reentrega el mismo
+  request, se vuelve a generar y publicar el mismo embedding — efecto idéntico al
+  resultado deseado. El costo de un reintento es una inferencia de embedding extra
+  (barato con el stub; aceptable con ONNX en ausencia de carga alta).
+- Consecuencias: si en el futuro la generación de embeddings tiene efectos
+  secundarios (p. ej. facturación por llamada a una API externa), habrá que agregar
+  dedup. Hoy no aplica.
+- Reemplaza: `none`
+
 ### DEC-0008 - event_id por emision + upsert por ext_id para soportar reindex
 
 - Fecha: 2026-06-29
