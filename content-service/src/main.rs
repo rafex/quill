@@ -50,9 +50,12 @@ fn main() {
         "serve" => serve(),
         "publish-outbox" => publish_outbox(),
         "process-inbox" => process_inbox(),
+        "vacuum" => vacuum(),
+        "stats" => stats(),
+        "reindex" => reindex(),
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("available commands: init-db, serve, publish-outbox, process-inbox");
+            eprintln!("available commands: init-db, serve, publish-outbox, process-inbox, vacuum, stats, reindex");
             std::process::exit(1);
         }
     }
@@ -111,6 +114,76 @@ fn publish_outbox() {
     let published = outbox_publisher::publish_pending(&conn, &publisher);
     // give the background event loop time to flush the publish over the network
     // before the process exits.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    println!("published {published} event(s)");
+}
+
+fn vacuum() {
+    let path = db_path();
+    let conn = db::open(&path).expect("failed to open sqlite connection");
+    conn.execute_batch("VACUUM;").expect("VACUUM failed");
+    println!("vacuumed {path}");
+}
+
+fn stats() {
+    let conn = open_db();
+    let categories: i64 = conn
+        .query_row("SELECT COUNT(*) FROM categories", [], |r| r.get(0))
+        .unwrap_or(0);
+    let topics: i64 = conn
+        .query_row("SELECT COUNT(*) FROM topics", [], |r| r.get(0))
+        .unwrap_or(0);
+    let posts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM posts", [], |r| r.get(0))
+        .unwrap_or(0);
+    let comments: i64 = conn
+        .query_row("SELECT COUNT(*) FROM comments", [], |r| r.get(0))
+        .unwrap_or(0);
+    let outbox_pending: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outbox_events WHERE published_at IS NULL", [], |r| r.get(0))
+        .unwrap_or(0);
+    let outbox_total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outbox_events", [], |r| r.get(0))
+        .unwrap_or(0);
+    let inbox_processed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM inbox_messages", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    println!("content-service stats ({}):", db_path());
+    println!("  categories:      {categories}");
+    println!("  topics:          {topics}");
+    println!("  posts:           {posts}");
+    println!("  comments:        {comments}");
+    println!("  outbox pending:  {outbox_pending} / {outbox_total}");
+    println!("  inbox processed: {inbox_processed}");
+}
+
+/// Republishes forum.post.created / forum.comment.created for all existing
+/// content so search-service can reindex everything from scratch.
+/// Equivalent to: ReindexContent::execute() + publish-outbox in one step.
+fn reindex() {
+    let conn = Arc::new(Mutex::new(open_db()));
+    let posts: Arc<dyn PostRepository> = Arc::new(SqlitePostRepository::new(conn.clone()));
+    let comments: Arc<dyn CommentRepository> = Arc::new(SqliteCommentRepository::new(conn.clone()));
+    let reindex_content = ReindexContent::new(posts, comments);
+
+    let (post_count, comment_count) = reindex_content
+        .execute()
+        .expect("failed to queue reindex events");
+    println!("queued {post_count} post(s) and {comment_count} comment(s) for reindex");
+
+    let (client, mut connection) =
+        mqtt::connect("content-service-reindex", &mqtt_host(), mqtt_port());
+    std::thread::spawn(move || {
+        for notification in connection.iter() {
+            if notification.is_err() {
+                break;
+            }
+        }
+    });
+
+    let publisher = MqttEventPublisher::new(client);
+    let published = outbox_publisher::publish_pending(&conn, &publisher);
     std::thread::sleep(std::time::Duration::from_millis(300));
     println!("published {published} event(s)");
 }

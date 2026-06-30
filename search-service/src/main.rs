@@ -112,9 +112,11 @@ fn main() {
         "process-inbox" => process_inbox(),
         "serve" => serve(),
         "download-model" => download_model(),
+        "vacuum" => vacuum(),
+        "stats" => stats(),
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("available commands: init-db, process-inbox, serve, download-model");
+            eprintln!("available commands: init-db, process-inbox, serve, download-model, vacuum, stats");
             std::process::exit(1);
         }
     }
@@ -130,6 +132,31 @@ fn download_model() {
 fn download_model() {
     eprintln!("download-model requires rebuilding with --features onnx-embeddings");
     std::process::exit(1);
+}
+
+fn vacuum() {
+    let path = db_path();
+    let conn = db::open(&path).expect("failed to open sqlite connection");
+    conn.execute_batch("VACUUM;").expect("VACUUM failed");
+    println!("vacuumed {path}");
+}
+
+fn stats() {
+    let conn = open_db();
+    let indexed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM content_fts", [], |r| r.get(0))
+        .unwrap_or(0);
+    let embeddings: i64 = conn
+        .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+        .unwrap_or(0);
+    let inbox_processed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM inbox_messages", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    println!("search-service stats ({}):", db_path());
+    println!("  indexed items:   {indexed}");
+    println!("  embeddings:      {embeddings}");
+    println!("  inbox processed: {inbox_processed}");
 }
 
 fn serve() {

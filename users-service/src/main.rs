@@ -62,9 +62,11 @@ fn main() {
         "serve" => serve(),
         "publish-outbox" => publish_outbox(),
         "process-inbox" => process_inbox(),
+        "vacuum" => vacuum(),
+        "stats" => stats(),
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("available commands: init-db, serve, publish-outbox, process-inbox");
+            eprintln!("available commands: init-db, serve, publish-outbox, process-inbox, vacuum, stats");
             std::process::exit(1);
         }
     }
@@ -120,6 +122,34 @@ fn publish_outbox() {
     // before the process exits.
     std::thread::sleep(std::time::Duration::from_millis(300));
     println!("published {published} event(s)");
+}
+
+fn vacuum() {
+    let path = db_path();
+    let conn = db::open(&path).expect("failed to open sqlite connection");
+    conn.execute_batch("VACUUM;").expect("VACUUM failed");
+    println!("vacuumed {path}");
+}
+
+fn stats() {
+    let conn = open_db();
+    let users: i64 = conn
+        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+        .unwrap_or(0);
+    let outbox_pending: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outbox_events WHERE published_at IS NULL", [], |r| r.get(0))
+        .unwrap_or(0);
+    let outbox_total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outbox_events", [], |r| r.get(0))
+        .unwrap_or(0);
+    let inbox_processed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM inbox_messages", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    println!("users-service stats ({}):", db_path());
+    println!("  users:           {users}");
+    println!("  outbox pending:  {outbox_pending} / {outbox_total}");
+    println!("  inbox processed: {inbox_processed}");
 }
 
 fn process_inbox() {
