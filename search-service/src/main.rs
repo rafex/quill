@@ -13,8 +13,6 @@ use infrastructure::{db, inbox_worker, mqtt};
 use ports::EmbeddingProvider;
 use rumqttc::QoS;
 use transport::AppState;
-use tracing_subscriber::EnvFilter;
-
 const POST_CREATED_TOPIC: &str = "forum.post.created";
 const COMMENT_CREATED_TOPIC: &str = "forum.comment.created";
 const EMBEDDING_REQUEST_TOPIC: &str = "forum.embedding.generate.request";
@@ -34,14 +32,6 @@ fn mqtt_port() -> u16 {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(1883)
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
 }
 
 fn publish_to_deadletter(
@@ -116,7 +106,7 @@ fn main() {
         _ => {}
     }
 
-    init_tracing();
+    quill_telemetry::init("search-service");
 
     match command.as_str() {
         "init-db" => {

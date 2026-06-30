@@ -11,8 +11,6 @@ use adapters::{MqttEventPublisher, SqliteUserRepository};
 use infrastructure::{db, inbox_worker, mqtt, outbox_publisher};
 use rumqttc::QoS;
 use transport::AppState;
-use tracing_subscriber::EnvFilter;
-
 fn db_path() -> String {
     std::env::var("USERS_DB_PATH").unwrap_or_else(|_| "users.sqlite".to_string())
 }
@@ -30,13 +28,6 @@ fn mqtt_port() -> u16 {
 
 const DEADLETTER_TOPIC: &str = "forum.deadletter";
 
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-}
 
 fn publish_to_deadletter(
     client: &rumqttc::Client,
@@ -68,7 +59,7 @@ fn main() {
         _ => {}
     }
 
-    init_tracing();
+    quill_telemetry::init("users-service");
 
     match command.as_str() {
         "init-db" => {

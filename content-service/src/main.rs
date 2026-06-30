@@ -16,8 +16,6 @@ use infrastructure::{db, inbox_worker, mqtt, outbox_publisher};
 use ports::{CommentRepository, PostRepository};
 use rumqttc::QoS;
 use transport::AppState;
-use tracing_subscriber::EnvFilter;
-
 const POST_CREATE_REQUEST_TOPIC: &str = "forum.post.create.request";
 const COMMENT_CREATE_REQUEST_TOPIC: &str = "forum.comment.create.request";
 const REINDEX_REQUEST_TOPIC: &str = "forum.search.reindex.request";
@@ -38,14 +36,6 @@ fn mqtt_port() -> u16 {
         .unwrap_or(1883)
 }
 
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-}
-
 fn main() {
     let command = std::env::args().nth(1).unwrap_or_else(|| "help".to_string());
 
@@ -55,7 +45,7 @@ fn main() {
         _ => {}
     }
 
-    init_tracing();
+    quill_telemetry::init("content-service");
 
     match command.as_str() {
         "init-db" => {
