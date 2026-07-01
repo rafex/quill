@@ -19,6 +19,18 @@ import 'scripts/mqtt.just'
 default:
     @just --list --unsorted
 
+# ── Frontend ──────────────────────────────────────────────────────────────────
+
+# Start Vite dev server for the web frontend (TypeScript + Wasm)
+[group('web')]
+dev-web:
+    npm --prefix web run dev
+
+# Build the frontend for production (TypeScript check + Vite bundle)
+[group('web')]
+build-web:
+    make build-web
+
 # ── Services ──────────────────────────────────────────────────────────────────
 
 # Run users-service HTTP server (USERS_HTTP_ADDR, default 0.0.0.0:8080)
@@ -71,6 +83,7 @@ health:
     @echo "users-service:"; curl -sf http://localhost:8080/health | jq . || echo "OFFLINE"
     @echo "content-service:"; curl -sf http://localhost:8081/health | jq . || echo "OFFLINE"
     @echo "search-service:"; curl -sf http://localhost:8082/health | jq . || echo "OFFLINE"
+    @echo "web:"; curl -sf -o /dev/null -w "%{http_code}\n" http://localhost:8090/ || echo "OFFLINE"
 
 # Run a hybrid search query
 # Usage: just search "cars and driving"

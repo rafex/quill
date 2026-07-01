@@ -3,6 +3,7 @@ pub mod db;
 pub mod inbox_worker;
 pub mod mqtt;
 pub mod outbox_publisher;
+pub mod sse_broadcaster;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

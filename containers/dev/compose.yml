@@ -7,6 +7,7 @@
 #   8080  users-service  HTTP
 #   8081  content-service HTTP
 #   8082  search-service  HTTP
+#   8090  web             (Nginx, static frontend)
 
 name: quill-dev
 
@@ -85,6 +86,19 @@ services:
     depends_on:
       mosquitto:
         condition: service_healthy
+    restart: on-failure
+
+  # ── web (static frontend) ─────────────────────────────────────────────────
+  web:
+    build:
+      context: ../..
+      dockerfile: containers/Dockerfile.web
+    ports:
+      - "8090:80"
+    depends_on:
+      - users-service
+      - content-service
+      - search-service
     restart: on-failure
 
 volumes:

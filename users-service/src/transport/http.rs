@@ -4,6 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tower_http::cors::CorsLayer;
 use serde::{Deserialize, Serialize};
 
 use crate::application::{CreateUser, CreateUserError, GetUserById};
@@ -53,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .route("/ready", get(health::ready))
         .with_state(state)
+        .layer(CorsLayer::permissive())
 }
 
 async fn create_user(

@@ -12,7 +12,7 @@ use adapters::{
     SqliteTopicRepository,
 };
 use application::{CreateComment, CreatePost, ReindexContent};
-use infrastructure::{db, inbox_worker, mqtt, outbox_publisher};
+use infrastructure::{db, inbox_worker, mqtt, outbox_publisher, sse_broadcaster};
 use ports::{CommentRepository, PostRepository};
 use rumqttc::QoS;
 use transport::AppState;
@@ -75,12 +75,14 @@ fn open_db() -> rusqlite::Connection {
 
 fn serve() {
     let conn = Arc::new(Mutex::new(open_db()));
+    let events = sse_broadcaster::spawn(mqtt_host(), mqtt_port());
 
     let state = AppState {
         categories: Arc::new(SqliteCategoryRepository::new(conn.clone())),
         topics: Arc::new(SqliteTopicRepository::new(conn.clone())),
         posts: Arc::new(SqlitePostRepository::new(conn.clone())),
         comments: Arc::new(SqliteCommentRepository::new(conn)),
+        events,
     };
 
     let addr = std::env::var("CONTENT_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string());

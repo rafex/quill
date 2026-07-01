@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["quill-telemetry", "users-service", "content-service", "search-service"]
+members = ["quill-telemetry", "quill-wasm", "users-service", "content-service", "search-service"]
+
+[profile.release.package.quill-wasm]
+opt-level = "s"

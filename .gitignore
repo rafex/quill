@@ -9,3 +9,8 @@
 
 # downloaded ONNX embedding models (fetched via `search-service download-model`)
 **/models/
+
+# Frontend (web/) — generated artifacts
+web/node_modules/
+web/dist/
+web/wasm/pkg/

@@ -1,10 +1,17 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::stream::Stream;
+use tower_http::cors::CorsLayer;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 
 use crate::application::{
     CreateCategory, CreateCategoryError, CreateComment, CreateCommentError, CreatePost,
@@ -20,6 +27,7 @@ pub struct AppState {
     pub topics: Arc<dyn TopicRepository>,
     pub posts: Arc<dyn PostRepository>,
     pub comments: Arc<dyn CommentRepository>,
+    pub events: broadcast::Sender<String>,
 }
 
 #[derive(Serialize)]
@@ -45,9 +53,11 @@ pub fn router(state: AppState) -> Router {
         .route("/posts/:id", get(get_post))
         .route("/comments", post(create_comment))
         .route("/comments/:id", get(get_comment))
+        .route("/events", get(sse_events))
         .route("/health", get(health::health))
         .route("/ready", get(health::ready))
         .with_state(state)
+        .layer(CorsLayer::permissive())
 }
 
 #[derive(Serialize)]
@@ -252,4 +262,13 @@ async fn get_comment(
         Err(RepositoryError::Unknown(m)) => (StatusCode::INTERNAL_SERVER_ERROR, error_body(m)),
         Err(RepositoryError::Duplicate) => unreachable!("find_by_id never returns Duplicate"),
     }
+}
+
+async fn sse_events(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = BroadcastStream::new(state.events.subscribe())
+        .filter_map(|msg| msg.ok().map(|data| Ok(Event::default().data(data))));
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
