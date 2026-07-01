@@ -139,3 +139,35 @@ dev-ps:
 [group('containers')]
 dev-restart svc:
     {{COMPOSE_DEV}} up -d --build {{svc}}
+
+# ── Remote access (Podman runs on a bastion host) ───────────────────────────────
+
+# Open an SSH tunnel forwarding the app ports (8080-8082, 8090) from bastion
+# to localhost, so you can reach the stack from a browser on this machine.
+# Runs in the foreground — Ctrl-C to close the tunnel.
+[group('containers')]
+tunnel:
+    ssh -N \
+        -L 8080:localhost:8080 \
+        -L 8081:localhost:8081 \
+        -L 8082:localhost:8082 \
+        -L 8090:localhost:8090 \
+        bastion
+
+# Same as `tunnel`, but detached (runs in the background).
+# Usage: just tunnel-up   /   just tunnel-down to close it
+[group('containers')]
+tunnel-up:
+    ssh -fN \
+        -o ExitOnForwardFailure=yes \
+        -L 8080:localhost:8080 \
+        -L 8081:localhost:8081 \
+        -L 8082:localhost:8082 \
+        -L 8090:localhost:8090 \
+        bastion
+    @echo "tunnel up — web: http://localhost:8090  users: 8080  content: 8081  search: 8082"
+
+# Close the background tunnel opened by `tunnel-up`
+[group('containers')]
+tunnel-down:
+    pkill -f "ssh -fN .*-L 8090:localhost:8090.*bastion" || echo "no tunnel running"

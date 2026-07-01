@@ -14,12 +14,15 @@ name: quill-dev
 services:
 
   # ── Broker ────────────────────────────────────────────────────────────────
+  # Bundles mosquitto.conf into the image (see containers/Dockerfile.mosquitto)
+  # instead of bind-mounting it, so this works with remote container backends
+  # too (e.g. a bastion host with no access to the local filesystem).
   mosquitto:
-    image: eclipse-mosquitto:2
+    build:
+      context: ../..
+      dockerfile: containers/Dockerfile.mosquitto
     ports:
       - "1883:1883"
-    volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     healthcheck:
       test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
       interval: 5s

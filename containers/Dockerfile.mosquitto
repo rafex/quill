@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+# Build context must be the workspace root:
+#   podman build -f containers/Dockerfile.mosquitto -t quill/mosquitto .
+#
+# Bundles mosquitto.conf into the image instead of relying on a bind-mount,
+# so the same compose file works whether the container engine runs on the
+# host machine or on a remote backend (e.g. a bastion) with no access to
+# the host's filesystem.
+
+FROM docker.io/library/eclipse-mosquitto:2
+
+COPY containers/dev/mosquitto/mosquitto.conf /mosquitto/config/mosquitto.conf
